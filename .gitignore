@@ -1,0 +1,9 @@
+/build/
+/install/
+/thirdparty/cache/
+__pycache__/
+*.pyc
+.vs/
+
+# Generated from the shared FormatValidation source during CMake configuration.
+/.clang-format
