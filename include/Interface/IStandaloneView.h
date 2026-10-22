@@ -5,7 +5,35 @@
 
 #    include <interface.h>
 
+struct cl_entity_s;
 struct ref_params_s;
+
+/*
+    Draws entities through the renderer that is installed: the engine's own model
+    renderers, or Renderer's replacements. Passed to IStandaloneView::DrawNormalTriangles /
+    DrawTransparentTriangles and valid only until that callback returns; using it
+    elsewhere is a fatal error.
+
+    The entity's model must match the function. Each call sets currententity (and for
+    sprites r_entorigin) and r_blend the way the engine's entity lists do, then restores
+    them: r_blend is 1 for kRenderNormal, CL_FxBlend / 255 otherwise, and nothing is
+    drawn when that is 0.
+*/
+class IStandaloneViewDrawfuncs
+{
+public:
+    // Dispatches to the engine's R_DrawBrushModel.
+    virtual void DrawBrushModel(struct cl_entity_s* ent) = 0;
+
+    // Dispatches to the studio model interface the engine uses (the client's, if it
+    // provides one): StudioDrawPlayer for players, StudioDrawModel otherwise, with
+    // STUDIO_RENDER and no STUDIO_EVENTS, so a view fires no model events.
+    virtual void DrawStudioModel(struct cl_entity_s* ent) = 0;
+
+    // Dispatches to the engine's R_DrawSpriteModel. A sprite with curstate.body follows
+    // attachment body of entity curstate.skin, as in the engine.
+    virtual void DrawSpriteModel(struct cl_entity_s* ent) = 0;
+};
 
 /*
     A view rendered by StandaloneView before the engine's main view, once per frame.
@@ -35,18 +63,21 @@ public:
 
     // Replace the client's HUD_DrawNormalTriangles / HUD_DrawTransparentTriangles
     // while this view is rendered. The engine's 3D matrices are already set up.
-    virtual void DrawNormalTriangles()      = 0;
-    virtual void DrawTransparentTriangles() = 0;
+    // pDrawfuncs is valid only until the callback returns.
+    virtual void DrawNormalTriangles(IStandaloneViewDrawfuncs* pDrawfuncs)      = 0;
+    virtual void DrawTransparentTriangles(IStandaloneViewDrawfuncs* pDrawfuncs) = 0;
 };
 
 class IStandaloneViewManager : public IBaseInterface
 {
 public:
-    // Registering twice is ignored. A view may unregister itself from its own callbacks.
-    virtual void RegisterStandaloneView(IStandaloneView* pView)   = 0;
+    // Registering twice is ignored. A view registered from a callback renders from the next frame.
+    virtual void RegisterStandaloneView(IStandaloneView* pView) = 0;
+    // Must not be called from any IStandaloneView callback: that is a fatal error.
+    // Unregister before destroying the view, outside StandaloneView callbacks.
     virtual void UnregisterStandaloneView(IStandaloneView* pView) = 0;
 };
 
-#    define STANDALONEVIEW_MANAGER_INTERFACE_VERSION "StandaloneViewManager_API_001"
+#    define STANDALONEVIEW_MANAGER_INTERFACE_VERSION "StandaloneViewManager_API_002"
 
 #endif //STANDALONE_VIEW_INTERFACE_H

@@ -3,6 +3,7 @@
 #include <com_model.h>
 #include <const.h>
 #include <ref_params.h>
+#include <cstdarg>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -47,6 +48,24 @@ void Log(const std::string& text)
         events += ' ';
     events += text;
 }
+
+std::string lastError;
+
+// The real SysError does not return; the fake records the call and continues.
+void SysError(const char* format, ...)
+{
+    char    message[512];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    Log("sys:error");
+    lastError = message;
+}
+
+void EngineDrawBrush(cl_entity_s*) { Log("engine:brush"); }
+void EngineDrawSprite(cl_entity_s*) { Log("engine:sprite"); }
+void ClientDrawStudio(cl_entity_s*) { Log("client:studio"); }
 
 CStandaloneViewManager& Manager()
 {
@@ -106,17 +125,55 @@ public:
             (worldModel == standaloneview::GetEmptyWorldModel() ? ",empty" : "") + ")");
         if (unregisterInBefore)
             Manager().UnregisterStandaloneView(this);
+        if (registerInBefore)
+            Manager().RegisterStandaloneView(registerInBefore);
         if (renderInBefore)
             Manager().RenderView();
     }
     void OnAfterRenderView() override { Log(m_Name + ":after"); }
-    void DrawNormalTriangles() override { Log(m_Name + ":normal"); }
-    void DrawTransparentTriangles() override { Log(m_Name + ":trans"); }
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs* pDrawfuncs) override
+    {
+        Log(m_Name + ":normal");
+        Draw(pDrawfuncs);
+    }
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs* pDrawfuncs) override
+    {
+        Log(m_Name + ":trans");
+        Draw(pDrawfuncs);
+    }
 
     bool active             = true;
     bool unregisterInBefore = false;
     bool unregisterInCalc   = false;
     bool renderInBefore     = false;
+
+    IStandaloneView* registerInBefore = nullptr;
+    // Drawn from both triangle callbacks with the function named by the model type.
+    std::vector<cl_entity_t*> drawEntities;
+    // Uses the brush function regardless of the model type.
+    bool                      drawAsBrush   = false;
+    IStandaloneViewDrawfuncs* lastDrawfuncs = nullptr;
+
+private:
+    void Draw(IStandaloneViewDrawfuncs* pDrawfuncs)
+    {
+        lastDrawfuncs = pDrawfuncs;
+        for (auto ent : drawEntities)
+        {
+            if (drawAsBrush)
+            {
+                pDrawfuncs->DrawBrushModel(ent);
+                continue;
+            }
+            switch (ent->model->type)
+            {
+                case mod_brush: pDrawfuncs->DrawBrushModel(ent); break;
+                case mod_studio: pDrawfuncs->DrawStudioModel(ent); break;
+                case mod_sprite: pDrawfuncs->DrawSpriteModel(ent); break;
+                default: break;
+            }
+        }
+    }
 
 private:
     std::string m_Name;
@@ -129,21 +186,26 @@ void ResetState()
     Manager().ResetClient();
 
     standaloneview::EngineBridge engine;
-    engine.V_RenderView   = EngineRenderView;
-    engine.IsDemoPlayback = IsDemoPlayback;
-    engine.clientState    = &clientState;
-    engine.clientSignon   = &clientSignon;
-    engine.worldModel     = &worldModel;
-    engine.worldEntity    = &worldEntity;
+    engine.V_RenderView    = EngineRenderView;
+    engine.IsDemoPlayback  = IsDemoPlayback;
+    engine.clientState     = &clientState;
+    engine.clientSignon    = &clientSignon;
+    engine.worldModel      = &worldModel;
+    engine.worldEntity     = &worldEntity;
+    engine.SysError        = SysError;
+    engine.DrawBrushModel  = EngineDrawBrush;
+    engine.DrawSpriteModel = EngineDrawSprite;
     Manager().SetEngine(engine);
 
     standaloneview::ClientBridge client;
     client.V_CalcRefdef             = ClientCalcRefdef;
     client.DrawNormalTriangles      = ClientDrawNormal;
     client.DrawTransparentTriangles = ClientDrawTransparent;
+    client.DrawStudioModel          = ClientDrawStudio;
     Manager().SetClient(client);
 
     events.clear();
+    lastError.clear();
     clientState  = 1;
     clientSignon = 0;
     worldModel   = nullptr;
@@ -306,22 +368,97 @@ void UnregisterDuringRender()
     TestView a("a");
     TestView b("b");
     a.unregisterInBefore = true;
+    b.unregisterInCalc   = true;
     Manager().RegisterStandaloneView(&a);
     Manager().RegisterStandaloneView(&b);
     Frame();
-    CheckText("view unregistered before rendering is skipped",
-              "a:before(state=5,signon=2,empty) b:before(state=5,signon=2,empty) b:calc b:normal b:trans engine:view b:after main:skipped",
+    CheckText("unregistering from a callback is a fatal error and keeps the view",
+              "a:before(state=5,signon=2,empty) sys:error a:calc a:normal a:trans engine:view a:after "
+              "b:before(state=5,signon=2,empty) b:calc sys:error b:normal b:trans engine:view b:after main:skipped",
               events);
+    Check("error names the call", 1, lastError.find("UnregisterStandaloneView") != std::string::npos);
+    Check("pass stays client-only", 1, lastRefdef.onlyClientDraw);
+    Check("state restored after the violation", 1, clientState);
 
-    ResetState();
+    events.clear();
     a.unregisterInBefore = false;
-    a.unregisterInCalc   = true;
+    b.unregisterInCalc   = false;
+    Manager().UnregisterStandaloneView(&a);
+    Manager().UnregisterStandaloneView(&b);
+    Frame();
+    CheckText("unregistering outside callbacks removes the views", "main:skipped", events);
+}
+
+void RegisterDuringRender()
+{
+    ResetState();
+    TestView a("a");
+    TestView b("b");
+    a.registerInBefore = &b;
     Manager().RegisterStandaloneView(&a);
     Frame();
-    CheckText("view unregistered while rendering receives no further callbacks",
-              "a:before(state=5,signon=2,empty) a:calc engine:view main:skipped", events);
-    Check("pass stays client-only", 1, lastRefdef.onlyClientDraw);
-    Check("state restored after unregister", 1, clientState);
+    CheckText("a view registered from a callback waits for the next frame",
+              "a:before(state=5,signon=2,empty) a:calc a:normal a:trans engine:view a:after main:skipped", events);
+
+    events.clear();
+    a.registerInBefore = nullptr;
+    Frame();
+    CheckText("a view registered from a callback renders from the next frame",
+              "a:before(state=5,signon=2,empty) a:calc a:normal a:trans engine:view a:after "
+              "b:before(state=5,signon=2,empty) b:calc b:normal b:trans engine:view b:after main:skipped",
+              events);
+    Check("registering from a callback is allowed", 1, lastError.empty());
+}
+
+void Drawfuncs()
+{
+    model_t brushModel  = {};
+    model_t studioModel = {};
+    model_t spriteModel = {};
+    brushModel.type     = mod_brush;
+    studioModel.type    = mod_studio;
+    spriteModel.type    = mod_sprite;
+    cl_entity_t brush   = {};
+    cl_entity_t studio  = {};
+    cl_entity_t sprite  = {};
+    brush.model         = &brushModel;
+    studio.model        = &studioModel;
+    sprite.model        = &spriteModel;
+
+    ResetState();
+    TestView view("a");
+    view.drawEntities = {&brush, &studio, &sprite};
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    CheckText("triangle callbacks draw entities through the renderer",
+              "a:before(state=5,signon=2,empty) a:calc a:normal engine:brush client:studio engine:sprite "
+              "a:trans engine:brush client:studio engine:sprite engine:view a:after main:skipped",
+              events);
+    Check("matching draws are valid", 1, lastError.empty());
+
+    events.clear();
+    view.drawEntities = {};
+    view.lastDrawfuncs->DrawStudioModel(&studio);
+    CheckText("draw functions outside the triangle callbacks are rejected", "sys:error", events);
+    Check("error names the misused function", 1,
+          lastError.find("IStandaloneViewDrawfuncs::DrawStudioModel was called outside") != std::string::npos);
+
+    ResetState();
+    view.drawEntities = {&studio};
+    view.drawAsBrush  = true;
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    CheckText("a model of the wrong type is rejected",
+              "a:before(state=5,signon=2,empty) a:calc a:normal sys:error a:trans sys:error engine:view a:after main:skipped",
+              events);
+    Check("error names the type mismatch", 1, lastError.find("matching type") != std::string::npos);
+
+    ResetState();
+    cl_entity_t empty = {};
+    view.drawEntities = {&empty};
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    Check("an entity without a model is rejected", 1, lastError.find("matching type") != std::string::npos);
 }
 
 void ForwardingWithoutView()
@@ -351,6 +488,8 @@ int main()
     LoadingFrames();
     Gates();
     UnregisterDuringRender();
+    RegisterDuringRender();
+    Drawfuncs();
     ForwardingWithoutView();
     std::printf("StandaloneView manager: %d failure(s)\n", failures);
     return failures ? 1 : 0;

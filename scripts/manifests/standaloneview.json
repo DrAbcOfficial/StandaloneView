@@ -22,7 +22,13 @@
       "cls.state": "global",
       "cls.signon": "global",
       "cl_worldmodel": "global",
-      "r_worldentity": "global"
+      "r_worldentity": "global",
+      "R_DrawBrushModel": "function",
+      "R_DrawSpriteModel": "function",
+      "CL_FxBlend": "function",
+      "currententity": "global",
+      "r_blend": "global",
+      "r_entorigin": "global"
     }
   },
   "conditionalGroups": [

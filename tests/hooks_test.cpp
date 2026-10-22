@@ -1,6 +1,8 @@
 #include <metahook.h>
 #include <cl_entity.h>
 #include <com_model.h>
+#include <const.h>
+#include <r_studioint.h>
 #include <ref_params.h>
 #include <cstdarg>
 #include <cstdio>
@@ -44,6 +46,28 @@ int         clientSignon = 0;
 model_t*    worldModel   = nullptr;
 cl_entity_t worldEntity  = {};
 
+// Engine draw globals and what the fake draw functions observed.
+constexpr int FxBlend       = 51;
+cl_entity_t*  currentEntity = nullptr;
+float         blend         = 0.25f;
+float         entOrigin[3]  = {};
+struct DrawCall
+{
+    const char*  function;
+    cl_entity_t* current;
+    float        blend;
+    float        origin[3];
+    int          flags;
+    void*        player;
+};
+std::vector<DrawCall> drawCalls;
+
+void RecordDraw(const char* function, int flags = 0, void* player = nullptr)
+{
+    DrawCall call{function, currentEntity, blend, {entOrigin[0], entOrigin[1], entOrigin[2]}, flags, player};
+    drawCalls.push_back(call);
+}
+
 void Check(const char* label, int expected, int actual)
 {
     if (expected != actual)
@@ -54,6 +78,8 @@ void Check(const char* label, int expected, int actual)
 }
 
 int portalManager = 0;
+// When set, the fake V_RenderView draws the client triangles like the engine.
+cl_exportfuncs_t* engineExports = nullptr;
 
 // Sven's V_RenderView renders the client portals before the client V_CalcRefdef; the
 // client resets its portal manager when it creates it on that first use.
@@ -65,6 +91,8 @@ void __cdecl OriginalRenderView()
         ref_params_t refdef = {};
         hookedRenderPortals(&portalManager, 0, &refdef);
     }
+    if (engineExports)
+        engineExports->HUD_DrawNormalTriangles();
     ++mainRenders;
 }
 void __fastcall OriginalRenderPortals(void*, int, ref_params_s*) { ++portalRenders; }
@@ -73,6 +101,10 @@ int __fastcall  OriginalResetAll(void*, int)
     ++portalResets;
     return 1;
 }
+void __cdecl EngineDrawBrush(cl_entity_t*) { RecordDraw("brush"); }
+void __cdecl EngineDrawSprite(cl_entity_t*) { RecordDraw("sprite"); }
+int __cdecl  EngineFxBlend(cl_entity_t*) { return FxBlend; }
+
 void __cdecl OriginalPaintBackground(int*)
 {
     ++paints;
@@ -116,7 +148,14 @@ const ExpectedSymbol symbols[] = {
     {"cls.signon", MH_GAMESYMBOL_KIND_GLOBAL, &clientSignon},
     {"cl_worldmodel", MH_GAMESYMBOL_KIND_GLOBAL, &worldModel},
     {"r_worldentity", MH_GAMESYMBOL_KIND_GLOBAL, &worldEntity},
+    {"R_DrawBrushModel", MH_GAMESYMBOL_KIND_FUNCTION, reinterpret_cast<void*>(EngineDrawBrush)},
+    {"R_DrawSpriteModel", MH_GAMESYMBOL_KIND_FUNCTION, reinterpret_cast<void*>(EngineDrawSprite)},
+    {"CL_FxBlend", MH_GAMESYMBOL_KIND_FUNCTION, reinterpret_cast<void*>(EngineFxBlend)},
+    {"currententity", MH_GAMESYMBOL_KIND_GLOBAL, &currentEntity},
+    {"r_blend", MH_GAMESYMBOL_KIND_GLOBAL, &blend},
+    {"r_entorigin", MH_GAMESYMBOL_KIND_GLOBAL, entOrigin},
 };
+constexpr int EngineSymbolCount = sizeof(symbols) / sizeof(symbols[0]);
 
 const ExpectedSymbol clientSymbols[] = {
     {"ClientPortalManager_RenderPortals", MH_GAMESYMBOL_KIND_FUNCTION, reinterpret_cast<void*>(OriginalRenderPortals)},
@@ -177,7 +216,7 @@ hook_t* InlineHook(void* address, void* replacement, void** original)
 {
     ++installs;
     if (!IsClientAddress(address))
-        Check("resolve every engine symbol before any engine installation", 6, engineResolves);
+        Check("resolve every engine symbol before any engine installation", EngineSymbolCount, engineResolves);
     else
         Check("resolve every client symbol before any client installation", 2, resolves - engineResolves);
     if (failInstall == installs)
@@ -205,14 +244,21 @@ class CountingView : public IStandaloneView
 public:
     bool IsActive() const override { return true; }
     void CalcRefdef(ref_params_s*) override { ++calcs; }
-    void OnBeforeRenderView() override { ++renders; }
+    void OnBeforeRenderView() override
+    {
+        ++renders;
+        if (unregisterInBefore)
+            StandaloneViewManager().UnregisterStandaloneView(this);
+    }
     void OnAfterRenderView() override {}
-    void DrawNormalTriangles() override { ++draws; }
-    void DrawTransparentTriangles() override { ++draws; }
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs*) override { ++draws; }
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override { ++draws; }
 
     int renders = 0;
     int calcs   = 0;
     int draws   = 0;
+
+    bool unregisterInBefore = false;
 };
 
 int  clientCalcs = 0;
@@ -259,6 +305,14 @@ void Success()
     Check("paint background renders the view", 1, view.renders);
     Check("view and main view both reach the engine", 3, mainRenders);
     Check("cls.state restored", 1, clientState);
+
+    error[0]                = '\0';
+    view.unregisterInBefore = true;
+    hookedPaintBackground(extents);
+    Check("unregistering from a callback reaches MetaHook SysError", 1,
+          std::strstr(error, "UnregisterStandaloneView") != nullptr);
+    view.unregisterInBefore = false;
+    StandaloneViewManager().UnregisterStandaloneView(&view);
 
     standaloneview::UninstallEngineHooks();
     Check("both removed", 2, static_cast<int>(removed.size()));
@@ -370,6 +424,144 @@ void ClientFailures()
     Check("client install can retry after failure", 1, standaloneview::InstallClientHooks(&exports));
 }
 
+int StudioDrawModel(int flags)
+{
+    RecordDraw("studio", flags);
+    return 1;
+}
+int StudioDrawPlayer(int flags, entity_state_s* player)
+{
+    RecordDraw("player", flags, player);
+    return 1;
+}
+
+constexpr int         MaxClients = 2;
+entity_state_t        playerStates[MaxClients];
+r_studio_interface_t  clientStudio          = {};
+r_studio_interface_t* engineStudioInterface = nullptr; // the engine's pStudioAPI
+engine_studio_api_t   engineStudioApi       = {};
+cl_entity_t           attachmentOwner       = {};
+
+entity_state_t* GetPlayerState(int index) { return &playerStates[index]; }
+int             GetMaxClients() { return MaxClients; }
+cl_entity_t*    GetEntityByIndex(int index) { return index == 7 ? &attachmentOwner : nullptr; }
+
+int ClientGetStudioModelInterface(int, r_studio_interface_t** ppinterface, engine_studio_api_t*)
+{
+    *ppinterface = &clientStudio;
+    return 1;
+}
+
+class DrawingView : public IStandaloneView
+{
+public:
+    bool IsActive() const override { return true; }
+    void CalcRefdef(ref_params_s*) override {}
+    void OnBeforeRenderView() override {}
+    void OnAfterRenderView() override {}
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs* pDrawfuncs) override
+    {
+        for (auto ent : brushes)
+            pDrawfuncs->DrawBrushModel(ent);
+        for (auto ent : sprites)
+            pDrawfuncs->DrawSpriteModel(ent);
+        for (auto ent : studios)
+            pDrawfuncs->DrawStudioModel(ent);
+    }
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override {}
+
+    std::vector<cl_entity_t*> brushes;
+    std::vector<cl_entity_t*> sprites;
+    std::vector<cl_entity_t*> studios;
+};
+
+void EntityDraws()
+{
+    Reset();
+    Check("engine install succeeds", 1, standaloneview::InstallEngineHooks());
+    auto exports                        = ClientExportTable();
+    exports.HUD_GetStudioModelInterface = ClientGetStudioModelInterface;
+    Check("client install succeeds", 1, standaloneview::InstallClientHooks(&exports));
+    Check("HUD_GetStudioModelInterface replaced", 1, exports.HUD_GetStudioModelInterface != ClientGetStudioModelInterface);
+    CommitHooks();
+    // As the engine does in ClientDLL_CheckStudioInterface.
+    Check("studio interface forwarded", 1, exports.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi));
+    Check("client studio interface reaches the engine", 1, engineStudioInterface == &clientStudio);
+
+    model_t brushModel  = {};
+    model_t spriteModel = {};
+    model_t studioModel = {};
+    brushModel.type     = mod_brush;
+    spriteModel.type    = mod_sprite;
+    studioModel.type    = mod_studio;
+
+    cl_entity_t brush                = {};
+    brush.model                      = &brushModel;
+    cl_entity_t transSprite          = {};
+    transSprite.model                = &spriteModel;
+    transSprite.curstate.rendermode  = kRenderTransAdd;
+    transSprite.curstate.skin        = 7;
+    transSprite.curstate.body        = 2;
+    transSprite.origin[0]            = 100;
+    attachmentOwner.attachment[1][0] = 5;
+    attachmentOwner.attachment[1][1] = 6;
+    attachmentOwner.attachment[1][2] = 7;
+    cl_entity_t studio               = {};
+    studio.model                     = &studioModel;
+    cl_entity_t player               = {};
+    player.model                     = &studioModel;
+    player.player                    = 1;
+    player.index                     = 2;
+    cl_entity_t invalidPlayer        = player;
+    invalidPlayer.index              = MaxClients + 1;
+
+    DrawingView view;
+    view.brushes = {&brush};
+    view.sprites = {&transSprite};
+    view.studios = {&studio, &player, &invalidPlayer};
+    StandaloneViewManager().RegisterStandaloneView(&view);
+
+    cl_entity_t previous = {};
+    currentEntity        = &previous;
+    blend                = 0.25f;
+    entOrigin[0]         = 9;
+    int extents[4]       = {};
+    engineExports        = &exports;
+    hookedPaintBackground(extents);
+    engineExports = nullptr;
+
+    Check("valid entities draw once each", 4, static_cast<int>(drawCalls.size()));
+    if (drawCalls.size() == 4)
+    {
+        Check("brush dispatches to R_DrawBrushModel", 0, std::strcmp(drawCalls[0].function, "brush"));
+        Check("brush is the current entity", 1, drawCalls[0].current == &brush);
+        Check("normal render mode draws opaque", 1, drawCalls[0].blend == 1.0f);
+
+        Check("sprite dispatches to R_DrawSpriteModel", 0, std::strcmp(drawCalls[1].function, "sprite"));
+        Check("sprite is the current entity", 1, drawCalls[1].current == &transSprite);
+        Check("transparent render mode uses CL_FxBlend", 1, drawCalls[1].blend == FxBlend / 255.0f);
+        Check("sprite follows its attachment", 1,
+              drawCalls[1].origin[0] == 5 && drawCalls[1].origin[1] == 6 && drawCalls[1].origin[2] == 7);
+
+        Check("studio dispatches to StudioDrawModel", 0, std::strcmp(drawCalls[2].function, "studio"));
+        Check("studio is the current entity", 1, drawCalls[2].current == &studio);
+        Check("studio renders without events", STUDIO_RENDER, drawCalls[2].flags);
+
+        Check("player dispatches to StudioDrawPlayer", 0, std::strcmp(drawCalls[3].function, "player"));
+        Check("player state of the entity's slot", 1, drawCalls[3].player == &playerStates[1]);
+        Check("player renders without events", STUDIO_RENDER, drawCalls[3].flags);
+    }
+    Check("current entity restored", 1, currentEntity == &previous);
+    Check("r_blend restored", 1, blend == 0.25f);
+    Check("r_entorigin restored", 9, static_cast<int>(entOrigin[0]));
+    Check("valid draws report nothing", 0, static_cast<int>(std::strlen(error)));
+
+    StandaloneViewManager().UnregisterStandaloneView(&view);
+    standaloneview::UninstallClientHooks();
+    standaloneview::UninstallEngineHooks();
+    drawCalls.clear();
+}
+
 void Failures()
 {
     for (const auto& symbol : symbols)
@@ -413,10 +605,18 @@ int main()
     api.InlineHook                = InlineHook;
     api.UnHook                    = UnHook;
     g_pMetaHookAPI                = &api;
+
+    gEngfuncs.GetMaxClients        = GetMaxClients;
+    gEngfuncs.GetEntityByIndex     = GetEntityByIndex;
+    clientStudio.version           = STUDIO_INTERFACE_VERSION;
+    clientStudio.StudioDrawModel   = StudioDrawModel;
+    clientStudio.StudioDrawPlayer  = StudioDrawPlayer;
+    engineStudioApi.GetPlayerState = GetPlayerState;
     Success();
     ClientExports();
     SvenPortals();
     ClientFailures();
+    EntityDraws();
     Failures();
     std::printf("StandaloneView hooks: %d failure(s)\n", failures);
     return failures ? 1 : 0;

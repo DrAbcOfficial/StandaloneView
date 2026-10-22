@@ -25,8 +25,9 @@ During a view's pass the client export `V_CalcRefdef` calls only the view's
 `CalcRefdef`, then forces `onlyClientDraw = 1` and `nextView = 0`; the engine
 therefore draws neither the world nor its entities. `HUD_DrawNormalTriangles` /
 `HUD_DrawTransparentTriangles` call only the view's triangle callbacks, where the
-view draws its own content with TriAPI or `IEngineStudio`. The client's own
-implementations are not called for standalone views.
+view draws its own content with TriAPI, OpenGL or the `IStandaloneViewDrawfuncs`
+passed to the callback. The client's own implementations are not called for
+standalone views.
 
 Views render before the main view because each `V_RenderView` call resets the
 sound listener, records the demo view info and writes the refdef back into client
@@ -43,8 +44,9 @@ the first map. `HUD_VidInit` resets the portal manager again for every map.
 ## Interface
 
 `include/Interface/IStandaloneView.h` declares `IStandaloneView`, implemented by
-the consumer, and `IStandaloneViewManager`, exposed as
-`StandaloneViewManager_API_001` from `StandaloneView.dll`:
+the consumer, `IStandaloneViewDrawfuncs`, passed to its triangle callbacks, and
+`IStandaloneViewManager`, exposed as `StandaloneViewManager_API_002` from
+`StandaloneView.dll`:
 
 ```cpp
 auto module = GetModuleHandleA("StandaloneView.dll");
@@ -77,15 +79,34 @@ the view objects are destroyed. Usage rules:
   sprite textures cannot be used at the main menu. With Renderer, TriAPI does not
   sample textures bound with `glBindTexture` either; draw there with your own
   OpenGL resources.
-- A view may unregister itself from its own callbacks; it receives no further
-  callbacks for that frame.
+- `IStandaloneViewDrawfuncs` draws one entity with the installed renderer:
+  `DrawBrushModel` and `DrawSpriteModel` call the engine's `R_DrawBrushModel` /
+  `R_DrawSpriteModel`; `DrawStudioModel` calls the client's `StudioDrawPlayer` for
+  player entities, with the state of player slot `index - 1`, and `StudioDrawModel`
+  otherwise, with `STUDIO_RENDER` only, so no animation events fire. Each call sets
+  `currententity` and `r_blend` like the engine's entity lists, `1` for
+  `kRenderNormal` and `CL_FxBlend / 255` otherwise, skips the entity when that is
+  `0`, and restores both afterwards. A sprite with `curstate.body` 1-4 is drawn at
+  that attachment of entity `curstate.skin`. Glow sprites are not faded by
+  visibility. Only use the pointer until the callback returns; calling it at any
+  other time, or with an entity whose model is missing or of another type, is a
+  fatal error.
+- In first person Sven Co-op's client skips `StudioDrawPlayer` for the local player
+  entity itself, unless a renderer such as Renderer replaces that path. Draw a copy
+  of the entity to show the local player.
+- Never call `UnregisterStandaloneView` from an `IStandaloneView` callback, for any
+  view: StandaloneView reports it as a fatal error. Unregister, then destroy, outside
+  StandaloneView callbacks, e.g. from the code that closes the owning UI. Views
+  registered from a callback render from the next frame.
 - List `StandaloneView.dll` before other plugins in `plugins.lst`. `LoadClient`
   runs in reverse list order, so the first plugin wraps the client exports last and
   its wrappers run first: other plugins' `V_CalcRefdef` then never change a
   standalone view's refdef.
 
 With Renderer, a standalone pass with an empty world additionally requires
-Renderer to skip its water pass for `onlyClientDraws` views.
+Renderer to skip its water pass for `onlyClientDraws` views, and
+`IStandaloneViewDrawfuncs` requires Renderer to route the engine's
+`R_DrawBrushModel` / `R_DrawSpriteModel` to its own implementations.
 
 ## Installation
 
@@ -129,7 +150,8 @@ MetaHook installation. See the [aggregator documentation](https://github.com/Met
 Regression tests compile the production manager, empty world and hook installation
 code against the SDK. They model the engine's `V_RenderView` and cover render
 order, forced and restored client state, the empty world, the paint-background
-gate, demo playback, reentrancy, unregistering during a pass, export routing and
+gate, demo playback, reentrancy, the unregister-during-a-pass contract, export routing,
+entity draws through `IStandaloneViewDrawfuncs` and
 installation rollback, including MetaHook committing inline hooks only after
 `LoadEngine` / `LoadClient` return. They do not replace in-game verification.
 
