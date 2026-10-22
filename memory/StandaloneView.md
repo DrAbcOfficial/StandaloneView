@@ -17,14 +17,17 @@ depending on Renderer. It replaces the in-Renderer approach of Renderer PR #18.
 
 ## Source entry points
 
-- `include/Interface/IStandaloneView.h`: `IStandaloneView` (consumer callbacks) and
-  `IStandaloneViewManager` (`StandaloneViewManager_API_001`). The issue named both
-  classes `IStandaloneView`; the manager was renamed.
+- `include/Interface/IStandaloneView.h`: `IStandaloneView` (consumer callbacks),
+  `IStandaloneViewDrawfuncs` (entity draws, passed to the triangle callbacks) and
+  `IStandaloneViewManager` (`StandaloneViewManager_API_002`). The issue named both
+  classes `IStandaloneView`; the manager was renamed. API_001 (triangle callbacks
+  without parameters) was never released and is not exported any more.
 - `src/StandaloneViewManager.cpp`: registry, render loop, `V_CalcRefdef` and triangle
   routing, behind `standaloneview::EngineBridge` / `ClientBridge` for tests.
 - `src/EmptyWorld.cpp`: `EmptyWorldScope`, the empty worldmodel for frames without a map.
 - `src/privatehook.cpp`: gamedata resolution, inline hooks (engine, and the Sven client's
-  portal manager), client export replacement.
+  portal manager), client export replacement, and the engine-side entity draws behind
+  `IStandaloneViewDrawfuncs` (`EntityDrawScope`, `DrawStudioModel`).
 - `src/plugins.cpp`: `IPluginsV4` lifecycle and the interface export.
 
 ## Render flow
@@ -73,6 +76,30 @@ call only the view's callbacks.
   and `leafs` point to one `CONTENTS_EMPTY` leaf with `numleafs = 0`:
   `Mod_PointInLeaf` returns at the root, `Mod_LeafPVS` returns novis for
   `leafs[0]`, and `R_MarkLeaves` marks nothing. Restored right after the views.
+- **No unregistering from callbacks (user decision, 2026-10-22).** While views
+  render (`IsRenderingStandaloneViews()`), `UnregisterStandaloneView` calls the
+  injected `SysError` and keeps the view. The render loop iterates `m_Views` by
+  index up to the size at the start of the pass, so registering from a callback is
+  allowed and takes effect next frame; the routed callbacks need no
+  "still registered" checks. Earlier code copied the list and re-checked
+  registration before every callback.
+- **Entity draws (user decision, 2026-10-22).** `IStandaloneViewDrawfuncs` is passed
+  to `DrawNormalTriangles` / `DrawTransparentTriangles` and valid only during them
+  (`m_bDrawingViewTriangles`); a call outside them, or with a NULL entity, NULL model
+  or another model type, calls the injected `SysError`. `DrawBrushModel` /
+  `DrawSpriteModel` call the engine's `R_DrawBrushModel` / `R_DrawSpriteModel`.
+  The engine has no `R_DrawStudioModel` (studio entities go through `pStudioAPI`), so
+  `DrawStudioModel` follows the engine's entity lists (user-supplied shape):
+  `StudioDrawPlayer(flags, GetPlayerState(index - 1))` for players, otherwise
+  `StudioDrawModel(flags)`. `pStudioAPI` and `engine_studio_api_t` are captured by
+  wrapping the client's `HUD_GetStudioModelInterface` (the engine keeps its default
+  interface when the client returns 0, and the captured `**ppinterface` sees that).
+  `flags = STUDIO_RENDER` without `STUDIO_EVENTS`: a preview must not fire sounds,
+  muzzle flashes or attachment writes. Each draw sets `currententity` and `r_blend`
+  (1 for `kRenderNormal`, `CL_FxBlend / 255` otherwise, skip at 0) and restores them;
+  sprites also get `r_entorigin` from attachment `body` of entity `skin`
+  (`R_GetAttachmentPoint` is unpublished). Glow sprites are not faded
+  (`GlowBlend` is inlined in Sven).
 - **Load order.** `LoadClient` runs in reverse `plugins.lst` order; listing
   StandaloneView first makes its export wrappers outermost.
 - **Loading world replaced too.** `CL_RegisterResources` sets `cl.worldmodel`, then
@@ -117,7 +144,13 @@ call only the view's callbacks.
 - Both builds inline `R_Clear` into `R_RenderView`.
 - Catalog (11 Windows identities) publishes `V_RenderView`,
   `VGui_ViewportPaintBackground`, `cls.state`, `cls.signon`, `cl_worldmodel`,
-  `r_worldentity`; not `R_Clear`, `ClientDLL_CalcRefdef`, `cls.demoplayback`.
+  `r_worldentity`, `R_DrawBrushModel`, `R_DrawSpriteModel`, `CL_FxBlend`,
+  `currententity`, `r_blend`, `r_entorigin`; not `R_Clear`, `ClientDLL_CalcRefdef`,
+  `cls.demoplayback`, `R_GetAttachmentPoint`.
+- Sven client 10257 `CGameStudioRenderer::StudioDrawPlayer` returns 0 in first person
+  when `currententity == GetLocalPlayer()`, the local player is the view entity and no
+  portal renders. Without Renderer a standalone view therefore has to draw a copy of
+  the local player entity; Renderer replaces that path and draws it.
 
 ## Renderer interaction
 
@@ -132,6 +165,11 @@ call only the view's callbacks.
   `fix/onlyclientdraws-water-pass`).
 - Renderer hooks `ClientPortalManager_RenderPortals` and `ResetAll` itself; the
   StandaloneView hooks chain with them.
+- Renderer reimplements `R_DrawBrushModel` / `R_DrawSpriteModel` but only replaced
+  their engine callers, so `IStandaloneViewDrawfuncs` reached the engine's GL code.
+  Renderer branch `feat/hook-entity-draws` inline-hooks both engine functions to its
+  own implementations. Studio draws already go through Renderer's
+  `StudioDrawPlayer` / `StudioDrawModel` hooks.
 
 ## Verification
 
@@ -150,5 +188,19 @@ call only the view's callbacks.
   - with Renderer (+ water fix): main menu corner green (pass composited; untextured
     TriAPI draws nothing there); in map center red, corner green, main view intact
     with no view leftovers; map load, `disconnect`, reload without crash.
+- 2026-10-22: `IStandaloneViewDrawfuncs` covered by `manager_test` (dispatch from both
+  callbacks, rejection outside them, wrong type, NULL model) and `hooks_test`
+  (`currententity` / `r_blend` / `r_entorigin` set and restored, attachment origin,
+  `STUDIO_RENDER` flags, player-state slot); mutations of the guard and the restore
+  were caught.
+- 2026-10-22 in game, Sven Co-op 10257, `map stadium4`, Debug builds, scratch consumer
+  drawing the local player, `models/w_medkit.mdl`, `sprites/flare1.spr` and brush
+  submodel `*13` (12x12x12) from `DrawNormalTriangles`:
+  - with Renderer (+ `feat/hook-entity-draws`): all four visible;
+  - without Renderer: medkit, sprite and brush visible; the local player entity itself
+    is skipped by the Sven client (see engine facts).
+  The first probe picked submodel `*5` (2080x2080x768) and placed the camera inside it,
+  so nothing was visible; pick small submodels for such probes.
 - Not verified: Half-Life 25th anniversary build, BulletPhysics third person, demo
-  playback, Release build in game.
+  playback, Release build in game, `IStandaloneViewDrawfuncs` from
+  `DrawTransparentTriangles` and transparent render modes in game.

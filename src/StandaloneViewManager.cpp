@@ -1,4 +1,6 @@
 #include <metahook.h>
+#include <cl_entity.h>
+#include <com_model.h>
 #include <ref_params.h>
 #include <algorithm>
 
@@ -55,6 +57,13 @@ void CStandaloneViewManager::RegisterStandaloneView(IStandaloneView* pView)
 
 void CStandaloneViewManager::UnregisterStandaloneView(IStandaloneView* pView)
 {
+    // The view list and the current view are in use until the views have rendered.
+    if (m_bRenderingStandaloneViews)
+    {
+        ReportMisuse("UnregisterStandaloneView", "was called from a standalone view callback; unregister views outside them");
+        return;
+    }
+
     m_Views.erase(std::remove(m_Views.begin(), m_Views.end(), pView), m_Views.end());
 }
 
@@ -84,6 +93,45 @@ void CStandaloneViewManager::ClearViews()
     m_Views.clear();
 }
 
+void CStandaloneViewManager::ReportMisuse(const char* function, const char* problem) const
+{
+    if (m_Engine.SysError)
+        m_Engine.SysError("[StandaloneView] %s %s.", function, problem);
+}
+
+bool CStandaloneViewManager::CanDrawEntity(const cl_entity_s* ent, int modelType, const char* function) const
+{
+    if (!m_bDrawingViewTriangles)
+    {
+        ReportMisuse(function, "was called outside the view's DrawNormalTriangles / DrawTransparentTriangles");
+        return false;
+    }
+    if (!ent || !ent->model || ent->model->type != modelType)
+    {
+        ReportMisuse(function, "requires an entity whose model has the matching type");
+        return false;
+    }
+    return true;
+}
+
+void CStandaloneViewManager::Drawfuncs::DrawBrushModel(cl_entity_s* ent)
+{
+    if (m_Manager.CanDrawEntity(ent, mod_brush, "IStandaloneViewDrawfuncs::DrawBrushModel") && m_Manager.m_Engine.DrawBrushModel)
+        m_Manager.m_Engine.DrawBrushModel(ent);
+}
+
+void CStandaloneViewManager::Drawfuncs::DrawStudioModel(cl_entity_s* ent)
+{
+    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::DrawStudioModel") && m_Manager.m_Client.DrawStudioModel)
+        m_Manager.m_Client.DrawStudioModel(ent);
+}
+
+void CStandaloneViewManager::Drawfuncs::DrawSpriteModel(cl_entity_s* ent)
+{
+    if (m_Manager.CanDrawEntity(ent, mod_sprite, "IStandaloneViewDrawfuncs::DrawSpriteModel") && m_Manager.m_Engine.DrawSpriteModel)
+        m_Manager.m_Engine.DrawSpriteModel(ent);
+}
+
 bool CStandaloneViewManager::IsRegistered(const IStandaloneView* pView) const
 {
     return std::find(m_Views.begin(), m_Views.end(), pView) != m_Views.end();
@@ -100,7 +148,7 @@ bool CStandaloneViewManager::ShouldRenderStandaloneViews() const
 {
     // Only the engine's own per-frame call renders views: other plugins may call
     // V_RenderView just to refresh the refdef (BulletPhysics does so from HUD_Frame).
-    if (m_iPaintBackgroundDepth <= 0 || m_bRenderingViews || m_Views.empty())
+    if (m_iPaintBackgroundDepth <= 0 || m_bRenderingStandaloneViews || m_Views.empty())
         return false;
 
     // Demo playback overwrites the refdef with the recorded view after CalcRefdef.
@@ -125,7 +173,7 @@ void CStandaloneViewManager::RenderView()
 
 void CStandaloneViewManager::RenderStandaloneViews()
 {
-    m_bRenderingViews = true;
+    m_bRenderingStandaloneViews = true;
 
     {
         // Only an active client has a fully loaded world; check before forcing the state.
@@ -134,29 +182,22 @@ void CStandaloneViewManager::RenderStandaloneViews()
         ClientStateScope                clientState(m_Engine.clientState, m_Engine.clientSignon);
         standaloneview::EmptyWorldScope emptyWorld(m_Engine.worldModel, m_Engine.worldEntity, worldReady);
 
-        // Callbacks may unregister views, including the one being rendered.
-        const auto views = m_Views;
-
-        for (auto pView : views)
+        // Callbacks cannot unregister views; views they register start with the next frame.
+        for (size_t i = 0, count = m_Views.size(); i < count; ++i)
         {
-            if (!IsRegistered(pView) || !pView->IsActive())
+            const auto pView = m_Views[i];
+            if (!pView->IsActive())
                 continue;
 
             m_pCurrentView = pView;
-
             pView->OnBeforeRenderView();
-
-            if (IsRegistered(pView))
-                m_Engine.V_RenderView();
-
-            if (IsRegistered(pView))
-                pView->OnAfterRenderView();
-
+            m_Engine.V_RenderView();
+            pView->OnAfterRenderView();
             m_pCurrentView = nullptr;
         }
     }
 
-    m_bRenderingViews = false;
+    m_bRenderingStandaloneViews = false;
 }
 
 void CStandaloneViewManager::CalcRefdef(ref_params_s* pparams)
@@ -165,8 +206,7 @@ void CStandaloneViewManager::CalcRefdef(ref_params_s* pparams)
     {
         // The client's V_CalcRefdef is skipped: its bob, punch and pitch drift state
         // advances per call and belongs to the main view only.
-        if (IsRegistered(m_pCurrentView))
-            m_pCurrentView->CalcRefdef(pparams);
+        m_pCurrentView->CalcRefdef(pparams);
         pparams->onlyClientDraw = 1;
         pparams->nextView       = 0;
         return;
@@ -180,8 +220,9 @@ void CStandaloneViewManager::DrawNormalTriangles()
 {
     if (m_pCurrentView)
     {
-        if (IsRegistered(m_pCurrentView))
-            m_pCurrentView->DrawNormalTriangles();
+        m_bDrawingViewTriangles = true;
+        m_pCurrentView->DrawNormalTriangles(&m_Drawfuncs);
+        m_bDrawingViewTriangles = false;
         return;
     }
 
@@ -193,8 +234,9 @@ void CStandaloneViewManager::DrawTransparentTriangles()
 {
     if (m_pCurrentView)
     {
-        if (IsRegistered(m_pCurrentView))
-            m_pCurrentView->DrawTransparentTriangles();
+        m_bDrawingViewTriangles = true;
+        m_pCurrentView->DrawTransparentTriangles(&m_Drawfuncs);
+        m_bDrawingViewTriangles = false;
         return;
     }
 

@@ -1,8 +1,11 @@
 #include <metahook.h>
 #include <cl_entity.h>
 #include <com_model.h>
+#include <const.h>
 #include <demo_api.h>
+#include <r_studioint.h>
 #include <ref_params.h>
+#include <cstring>
 
 #include "StandaloneViewManager.h"
 #include "privatehook.h"
@@ -20,6 +23,27 @@ using PaintBackgroundFn = void (*)(int* extents);
 // ClientPortalManager::RenderPortals and ResetAll are thiscall.
 using RenderPortalsFn = void(__fastcall*)(void* pthis, int, ref_params_s* pparams);
 using ResetAllFn      = int(__fastcall*)(void* pthis, int);
+
+// Engine functions and globals the entity draws use, resolved with the engine hooks.
+struct EngineDraw
+{
+    void (*R_DrawBrushModel)(cl_entity_t* ent)  = nullptr;
+    void (*R_DrawSpriteModel)(cl_entity_t* ent) = nullptr;
+    int (*CL_FxBlend)(cl_entity_t* ent)         = nullptr;
+    cl_entity_t** currententity                 = nullptr;
+    float*        r_blend                       = nullptr;
+    float*        r_entorigin                   = nullptr; // vec3_t
+};
+
+constexpr float MaxFxBlend        = 255.0f;
+constexpr int   EntityAttachments = 4;
+constexpr int   VectorComponents  = 3;
+
+EngineDraw engineDraw;
+// The engine's pStudioAPI and engine studio API, as passed to HUD_GetStudioModelInterface.
+r_studio_interface_t**    studioInterface                 = nullptr;
+engine_studio_api_t*      engineStudio                    = nullptr;
+HUD_STUDIO_INTERFACE_FUNC originalGetStudioModelInterface = nullptr;
 
 hook_t* renderViewHook                    = nullptr;
 hook_t* paintBackgroundHook               = nullptr;
@@ -157,6 +181,98 @@ bool IsSvenCoopClient()
     return clientFactory && clientFactory("SCClientDLL001", nullptr);
 }
 
+// Sets currententity and r_blend the way the engine's entity lists do, then restores them.
+class EntityDrawScope
+{
+public:
+    explicit EntityDrawScope(cl_entity_t* ent) :
+        m_pSavedEntity(*engineDraw.currententity),
+        m_flSavedBlend(*engineDraw.r_blend)
+    {
+        *engineDraw.currententity = ent;
+        *engineDraw.r_blend       = ent->curstate.rendermode == kRenderNormal ? 1.0f : engineDraw.CL_FxBlend(ent) / MaxFxBlend;
+    }
+
+    ~EntityDrawScope()
+    {
+        *engineDraw.currententity = m_pSavedEntity;
+        *engineDraw.r_blend       = m_flSavedBlend;
+    }
+
+    EntityDrawScope(const EntityDrawScope&)            = delete;
+    EntityDrawScope& operator=(const EntityDrawScope&) = delete;
+
+    bool IsVisible() const { return *engineDraw.r_blend > 0; }
+
+private:
+    cl_entity_t* m_pSavedEntity;
+    float        m_flSavedBlend;
+};
+
+void DrawBrushModel(cl_entity_s* ent)
+{
+    EntityDrawScope scope(ent);
+    if (scope.IsVisible())
+        engineDraw.R_DrawBrushModel(ent);
+}
+
+// A sprite with curstate.body follows attachment body of entity curstate.skin
+// (R_GetAttachmentPoint, not published as a symbol).
+const float* SpriteOrigin(cl_entity_t* ent)
+{
+    const int attachment = ent->curstate.body;
+    if (attachment <= 0 || attachment > EntityAttachments)
+        return ent->origin;
+
+    const auto owner = gEngfuncs.GetEntityByIndex(ent->curstate.skin);
+    return owner ? owner->attachment[attachment - 1] : ent->origin;
+}
+
+void DrawSpriteModel(cl_entity_s* ent)
+{
+    EntityDrawScope scope(ent);
+    if (!scope.IsVisible())
+        return;
+
+    float savedOrigin[VectorComponents];
+    memcpy(savedOrigin, engineDraw.r_entorigin, sizeof(savedOrigin));
+    memcpy(engineDraw.r_entorigin, SpriteOrigin(ent), sizeof(savedOrigin));
+    engineDraw.R_DrawSpriteModel(ent);
+    memcpy(engineDraw.r_entorigin, savedOrigin, sizeof(savedOrigin));
+}
+
+void DrawStudioModel(cl_entity_s* ent)
+{
+    if (!studioInterface || !*studioInterface)
+        return;
+
+    EntityDrawScope scope(ent);
+    if (!scope.IsVisible())
+        return;
+
+    const auto studio = *studioInterface;
+    if (!ent->player)
+    {
+        studio->StudioDrawModel(STUDIO_RENDER);
+        return;
+    }
+
+    const int playerIndex = ent->index - 1;
+    if (!engineStudio || playerIndex < 0 || playerIndex >= gEngfuncs.GetMaxClients())
+        return;
+    if (const auto state = engineStudio->GetPlayerState(playerIndex))
+        studio->StudioDrawPlayer(STUDIO_RENDER, state);
+}
+
+// The engine keeps its own interface in *ppinterface when the client provides none.
+int GetStudioModelInterfaceHook(int version, r_studio_interface_t** ppinterface, engine_studio_api_t* pstudio)
+{
+    const int result = originalGetStudioModelInterface(version, ppinterface, pstudio);
+    studioInterface  = ppinterface;
+    engineStudio     = pstudio;
+    return result;
+}
+
 void CalcRefdefHook(ref_params_s* pparams)
 {
     StandaloneViewManager().CalcRefdef(pparams);
@@ -182,7 +298,14 @@ bool InstallEngineHooks()
     void*        renderViewAddress      = nullptr;
     void*        paintBackgroundAddress = nullptr;
     EngineBridge engine;
-    if (!Resolve(module, "V_RenderView", MH_GAMESYMBOL_KIND_FUNCTION, &renderViewAddress) ||
+    EngineDraw   draw;
+    if (!Resolve(module, "R_DrawBrushModel", MH_GAMESYMBOL_KIND_FUNCTION, &draw.R_DrawBrushModel) ||
+        !Resolve(module, "R_DrawSpriteModel", MH_GAMESYMBOL_KIND_FUNCTION, &draw.R_DrawSpriteModel) ||
+        !Resolve(module, "CL_FxBlend", MH_GAMESYMBOL_KIND_FUNCTION, &draw.CL_FxBlend) ||
+        !Resolve(module, "currententity", MH_GAMESYMBOL_KIND_GLOBAL, &draw.currententity) ||
+        !Resolve(module, "r_blend", MH_GAMESYMBOL_KIND_GLOBAL, &draw.r_blend) ||
+        !Resolve(module, "r_entorigin", MH_GAMESYMBOL_KIND_GLOBAL, &draw.r_entorigin) ||
+        !Resolve(module, "V_RenderView", MH_GAMESYMBOL_KIND_FUNCTION, &renderViewAddress) ||
         !Resolve(module, "VGui_ViewportPaintBackground", MH_GAMESYMBOL_KIND_FUNCTION, &paintBackgroundAddress) ||
         !Resolve(module, "cls.state", MH_GAMESYMBOL_KIND_GLOBAL, &engine.clientState) ||
         !Resolve(module, "cls.signon", MH_GAMESYMBOL_KIND_GLOBAL, &engine.clientSignon) ||
@@ -206,8 +329,12 @@ bool InstallEngineHooks()
         return false;
     }
 
-    engine.V_RenderView   = CallOriginalRenderView;
-    engine.IsDemoPlayback = IsDemoPlayback;
+    engine.V_RenderView    = CallOriginalRenderView;
+    engine.IsDemoPlayback  = IsDemoPlayback;
+    engine.SysError        = g_pMetaHookAPI->SysError;
+    engine.DrawBrushModel  = DrawBrushModel;
+    engine.DrawSpriteModel = DrawSpriteModel;
+    engineDraw             = draw;
     StandaloneViewManager().SetEngine(engine);
     return true;
 }
@@ -227,6 +354,7 @@ void UninstallEngineHooks()
     }
     originalPaintBackground = nullptr;
     originalRenderView      = nullptr;
+    engineDraw              = {};
 }
 
 bool InstallClientHooks(cl_exportfuncs_t* pExportFunc)
@@ -238,7 +366,13 @@ bool InstallClientHooks(cl_exportfuncs_t* pExportFunc)
     client.V_CalcRefdef             = pExportFunc->V_CalcRefdef;
     client.DrawNormalTriangles      = pExportFunc->HUD_DrawNormalTriangles;
     client.DrawTransparentTriangles = pExportFunc->HUD_DrawTransparentTriangles;
+    client.DrawStudioModel          = DrawStudioModel;
     StandaloneViewManager().SetClient(client);
+
+    // Without the export the engine never asks; keep it that way.
+    originalGetStudioModelInterface = pExportFunc->HUD_GetStudioModelInterface;
+    if (originalGetStudioModelInterface)
+        pExportFunc->HUD_GetStudioModelInterface = GetStudioModelInterfaceHook;
 
     pExportFunc->V_CalcRefdef                 = CalcRefdefHook;
     pExportFunc->HUD_DrawNormalTriangles      = DrawNormalTrianglesHook;
@@ -252,5 +386,8 @@ void UninstallClientHooks()
     // only stop forwarding into the saved entry points.
     StandaloneViewManager().ResetClient();
     UninstallPortalHooks();
+    originalGetStudioModelInterface = nullptr;
+    studioInterface                 = nullptr;
+    engineStudio                    = nullptr;
 }
 } // namespace standaloneview
