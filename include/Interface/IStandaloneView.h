@@ -99,10 +99,11 @@ struct StudioLighting
 
 /*
     API_003 additions for model previews. A manager obtained as
-    STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003 hands an IStandaloneViewDrawfuncsV003
-    to the triangle callbacks; the API_002 manager keeps handing IStandaloneViewDrawfuncs.
-    The API_002 slots come first in the vtable, so an API_002 consumer receiving the
-    extended object through the base pointer is unaffected.
+    STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003 guarantees that the drawfuncs in the
+    triangle callbacks implement IStandaloneViewDrawfuncsV003. Query API_003 before
+    casting the callback's base pointer to the extended interface. API_002 and API_003
+    resolve to the same manager singleton; the API_002 slots remain first in the drawfuncs
+    vtable, so existing consumers are unaffected.
 
     Both functions take a private MOVETYPE_FOLLOW bone source: these entities are not
     registered in the engine's entity array, so aiment cannot reach their animation
@@ -114,6 +115,9 @@ struct StudioLighting
     no events. The engine studio bone transforms remain readable until the next studio
     call, so a preview can read the posed vertices through StudioGetBoneTransform
     afterwards. Returns false when the pose was not evaluated.
+    A null boneSource evaluates the entity's own pose. A non-null source must have a
+    studio model; an invalid or unevaluated source returns false from SetupStudioPose
+    and skips DrawStudioModelEx.
 
     DrawStudioModelEx draws with STUDIO_RENDER and no STUDIO_EVENTS (a preview must not
     fire model events). Pass a StudioLighting to draw with that light instead of the
@@ -124,9 +128,8 @@ struct StudioLighting
 class IStandaloneViewDrawfuncsV003 : public IStandaloneViewDrawfuncs
 {
 public:
-    virtual bool SetupStudioPose(struct cl_entity_s* ent, struct cl_entity_s* boneSource)   = 0;
-    virtual void DrawStudioModelEx(struct cl_entity_s* ent, struct cl_entity_s* boneSource,
-                                   const standaloneview::StudioLighting* lighting)          = 0;
+    virtual bool SetupStudioPose(struct cl_entity_s* ent, struct cl_entity_s* boneSource)                                                   = 0;
+    virtual void DrawStudioModelEx(struct cl_entity_s* ent, struct cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting) = 0;
 };
 
 #    define STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003 "StandaloneViewManager_API_003"

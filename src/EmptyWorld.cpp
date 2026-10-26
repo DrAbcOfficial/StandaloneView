@@ -2,6 +2,7 @@
 #include <cl_entity.h>
 #include <com_model.h>
 #include <const.h>
+#include <cvardef.h>
 #include <cstring>
 
 #include "EmptyWorld.h"
@@ -28,7 +29,7 @@ float   g_flSavedNoVis = 0.0f;
 
 void ArmNoVis()
 {
-    g_pNoVisCvar   = gEngfuncs.pfnGetCvarPointer ? gEngfuncs.pfnGetCvarPointer("r_novis") : nullptr;
+    g_pNoVisCvar = gEngfuncs.pfnGetCvarPointer ? gEngfuncs.pfnGetCvarPointer("r_novis") : nullptr;
     if (!g_pNoVisCvar)
         return;
     g_flSavedNoVis      = g_pNoVisCvar->value;

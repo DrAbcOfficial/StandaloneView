@@ -1,6 +1,7 @@
 #include <metahook.h>
 #include <cl_entity.h>
 #include <com_model.h>
+#include <cvardef.h>
 #include <const.h>
 #include <ref_params.h>
 #include <cstdarg>
@@ -482,13 +483,13 @@ void ForwardingWithoutView()
     CheckText("missing client exports are ignored", "", events);
 }
 
-cl_entity_t* lastPoseEnt            = nullptr;
-cl_entity_t* lastPoseBoneSource     = nullptr;
-bool         poseResult             = true;
-cl_entity_t* lastDrawExEnt          = nullptr;
-cl_entity_t* lastDrawExBoneSource   = nullptr;
+cl_entity_t*                          lastPoseEnt          = nullptr;
+cl_entity_t*                          lastPoseBoneSource   = nullptr;
+bool                                  poseResult           = true;
+cl_entity_t*                          lastDrawExEnt        = nullptr;
+cl_entity_t*                          lastDrawExBoneSource = nullptr;
 const standaloneview::StudioLighting* drawExActiveLighting = nullptr;
-standaloneview::StudioLighting previewLighting{};
+standaloneview::StudioLighting        previewLighting{};
 
 bool ClientSetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
 {
@@ -518,8 +519,8 @@ public:
 
     void Draw(IStandaloneViewDrawfuncs* pDrawfuncs)
     {
-        auto*         v003 = static_cast<IStandaloneViewDrawfuncsV003*>(pDrawfuncs);
-        lastDrawfuncs      = v003;
+        auto* v003    = static_cast<IStandaloneViewDrawfuncsV003*>(pDrawfuncs);
+        lastDrawfuncs = v003;
         if (callPose)
             posed = v003->SetupStudioPose(studio, useBoneSource ? source : nullptr);
         if (callDrawEx)
@@ -543,12 +544,12 @@ void V003StudioDrawfuncs()
     model_t brushModel  = {};
     studioModel.type    = mod_studio;
     brushModel.type     = mod_brush;
-    cl_entity_t studio = {};
-    cl_entity_t source = {};
-    cl_entity_t brush  = {};
-    studio.model       = &studioModel;
-    source.model       = &studioModel;
-    brush.model        = &brushModel;
+    cl_entity_t studio  = {};
+    cl_entity_t source  = {};
+    cl_entity_t brush   = {};
+    studio.model        = &studioModel;
+    source.model        = &studioModel;
+    brush.model         = &brushModel;
 
     ResetState();
     standaloneview::ClientBridge client;
@@ -577,9 +578,9 @@ void V003StudioDrawfuncs()
 
     events.clear();
     lastError.clear();
-    view.callDrawEx     = true;
-    view.useBoneSource  = true;
-    view.useLighting    = true;
+    view.callDrawEx    = true;
+    view.useBoneSource = true;
+    view.useLighting   = true;
     Frame();
     Check("the pose reaches the bridge with the bone source", 1, lastPoseEnt == &studio && lastPoseBoneSource == &source);
     Check("the pose result is forwarded", 1, view.posed);
@@ -593,6 +594,11 @@ void V003StudioDrawfuncs()
     Frame();
     Check("null lighting keeps the engine lighting", 1, drawExActiveLighting == nullptr);
 
+    poseResult = false;
+    Frame();
+    Check("failed bridge pose result is forwarded", 0, view.posed);
+    poseResult = true;
+
     events.clear();
     lastError.clear();
     view.studio = &brush;
@@ -600,7 +606,12 @@ void V003StudioDrawfuncs()
     Check("a model of the wrong type is rejected", 1, lastError.find("matching type") != std::string::npos);
 
     ResetState();
-    view.studio = &studio;
+    lastPoseEnt          = nullptr;
+    lastPoseBoneSource   = nullptr;
+    lastDrawExEnt        = nullptr;
+    lastDrawExBoneSource = nullptr;
+    drawExActiveLighting = nullptr;
+    view.studio          = &studio;
     Manager().RegisterStandaloneView(&view);
     Frame();
     Check("missing V003 bridges pose nothing", 0, view.posed);
@@ -611,7 +622,9 @@ void V003StudioDrawfuncs()
 void AdjustStudioLightingMath()
 {
     standaloneview::StudioLighting lighting{};
+    lighting.direction[0] = 0.0f;
     lighting.direction[1] = 2.0f;
+    lighting.color[0]     = 0.5f;
     alight_t light{};
     light.ambientlight = 10;
     light.shadelight   = 20;
@@ -636,11 +649,13 @@ void AdjustStudioLightingMath()
           light.ambientlight == 255 && light.shadelight == 0 && light.color[0] == 1.0f);
 }
 
-cvar_t noVisCvar = {};
+cvar_t noVisCvar      = {};
+bool   noVisAvailable = true;
 
-cvar_t* FakeGetCvarPointer(const char*)
+cvar_t* FakeGetCvarPointer(const char* name)
 {
-    return &noVisCvar;
+    CheckText("only the visibility cvar is requested", "r_novis", name);
+    return noVisAvailable ? &noVisCvar : nullptr;
 }
 
 class NoVisProbe : public IStandaloneView
@@ -649,11 +664,12 @@ public:
     bool IsActive() const override { return true; }
     void CalcRefdef(ref_params_s*) override {}
     void OnBeforeRenderView() override { valueDuringPass = noVisCvar.value; }
-    void OnAfterRenderView() override {}
+    void OnAfterRenderView() override { valueAfterPass = noVisCvar.value; }
     void DrawNormalTriangles(IStandaloneViewDrawfuncs*) override {}
     void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override {}
 
     float valueDuringPass = 0.0f;
+    float valueAfterPass  = 0.0f;
 };
 
 void EmptyWorldNoVis()
@@ -665,7 +681,18 @@ void EmptyWorldNoVis()
     Manager().RegisterStandaloneView(&view);
     Frame();
     Check("the empty world pass rides r_novis", 1, static_cast<int>(view.valueDuringPass));
+    Check("r_novis stays armed through capture", 1, static_cast<int>(view.valueAfterPass));
     Check("r_novis restored after the pass", 0, static_cast<int>(noVisCvar.value));
+
+    noVisCvar.value = 0.5f;
+    Frame();
+    Check("a nonzero visibility value is overridden during the pass", 1, view.valueDuringPass == 1.0f);
+    Check("the original fractional visibility value is restored", 1, noVisCvar.value == 0.5f);
+
+    noVisAvailable = false;
+    Frame();
+    Check("an unavailable visibility cvar is ignored", 1, noVisCvar.value == 0.5f && view.valueDuringPass == 0.5f);
+    noVisAvailable = true;
 
     ResetState();
     noVisCvar.value = 0.0f;

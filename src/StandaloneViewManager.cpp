@@ -141,8 +141,7 @@ bool CStandaloneViewManager::Drawfuncs::SetupStudioPose(cl_entity_s* ent, cl_ent
     return false;
 }
 
-void CStandaloneViewManager::Drawfuncs::DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource,
-                                                          const standaloneview::StudioLighting* lighting)
+void CStandaloneViewManager::Drawfuncs::DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting)
 {
     if (!m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncsV003::DrawStudioModelEx"))
         return;
@@ -153,7 +152,7 @@ void CStandaloneViewManager::Drawfuncs::DrawStudioModelEx(cl_entity_s* ent, cl_e
     // StudioSetupLighting synchronously inside this scope, where the host's hook
     // reads it back through CurrentStudioLighting.
     const standaloneview::StudioLighting* pSavedLighting = m_Manager.m_pStudioLighting;
-    m_Manager.m_pStudioLighting = lighting;
+    m_Manager.m_pStudioLighting                          = lighting;
     m_Manager.m_Client.DrawStudioModelEx(ent, boneSource);
     m_Manager.m_pStudioLighting = pSavedLighting;
 }
@@ -270,8 +269,7 @@ void CStandaloneViewManager::DrawTransparentTriangles()
         m_Client.DrawTransparentTriangles();
 }
 
-void CStandaloneViewManager::AdjustStudioLighting(struct alight_s* light, float* direction,
-                                                  const standaloneview::StudioLighting& lighting) const
+void CStandaloneViewManager::AdjustStudioLighting(struct alight_s* light, float* direction, const standaloneview::StudioLighting& lighting) const
 {
     if (!light || !direction)
         return;

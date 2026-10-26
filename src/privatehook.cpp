@@ -327,6 +327,13 @@ struct StudioLightBridge
 
 StudioLightBridge studioLightBridge;
 
+void UninstallStudioLighting()
+{
+    if (studioLightBridge.hook)
+        g_pMetaHookAPI->UnHook(studioLightBridge.hook);
+    studioLightBridge = {};
+}
+
 void StudioSetupLightingHook(alight_t* light)
 {
     const auto* lighting = StandaloneViewManager().CurrentStudioLighting();
@@ -347,11 +354,7 @@ void InstallStudioLighting()
 {
     if (!engineStudio || !engineStudio->StudioSetupLighting || studioLightBridge.target == engineStudio->StudioSetupLighting)
         return;
-    if (studioLightBridge.hook)
-    {
-        g_pMetaHookAPI->UnHook(studioLightBridge.hook);
-        studioLightBridge = {};
-    }
+    UninstallStudioLighting();
     studioLightBridge.target = engineStudio->StudioSetupLighting;
     studioLightBridge.hook   = g_pMetaHookAPI->InlineHook(reinterpret_cast<void*>(studioLightBridge.target),
                                                           reinterpret_cast<void*>(StudioSetupLightingHook),
@@ -442,6 +445,7 @@ bool InstallEngineHooks()
 void UninstallEngineHooks()
 {
     StandaloneViewManager().ResetEngine();
+    UninstallStudioLighting();
     if (paintBackgroundHook)
     {
         g_pMetaHookAPI->UnHook(paintBackgroundHook);

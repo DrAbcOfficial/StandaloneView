@@ -56,4 +56,3 @@ static IBaseInterface* CreateStandaloneViewManagerApi003()
     return static_cast<IStandaloneViewManager*>(&StandaloneViewManager());
 }
 static InterfaceReg g_Api003Registration(CreateStandaloneViewManagerApi003, STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003);
-

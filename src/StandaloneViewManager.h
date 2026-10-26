@@ -75,8 +75,7 @@ public:
     // Overlays a StudioLighting onto the engine's lighting result. Fills direction with
     // the normalized world-space light direction and points light->plightvec at it; the
     // engine consumes the values synchronously, so the array is owned by the caller.
-    void AdjustStudioLighting(struct alight_s* light, float* direction,
-                              const standaloneview::StudioLighting& lighting) const;
+    void AdjustStudioLighting(struct alight_s* light, float* direction, const standaloneview::StudioLighting& lighting) const;
 
 private:
     // Handed to the triangle callbacks of the view being rendered. Implements the API_003
@@ -92,8 +91,7 @@ private:
         void DrawStudioModel(cl_entity_s* ent) override;
         void DrawSpriteModel(cl_entity_s* ent) override;
         bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource) override;
-        void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource,
-                               const standaloneview::StudioLighting* lighting) override;
+        void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting) override;
 
     private:
         CStandaloneViewManager& m_Manager;
@@ -105,15 +103,15 @@ private:
     bool ShouldRenderStandaloneViews() const;
     void RenderStandaloneViews();
 
-    std::vector<IStandaloneView*> m_Views;
-    standaloneview::EngineBridge  m_Engine{};
-    standaloneview::ClientBridge  m_Client{};
-    IStandaloneView*              m_pCurrentView              = nullptr;
-    const standaloneview::StudioLighting* m_pStudioLighting   = nullptr;
-    int                           m_iPaintBackgroundDepth     = 0;
-    bool                          m_bRenderingStandaloneViews = false;
-    bool                          m_bDrawingViewTriangles     = false;
-    Drawfuncs                     m_Drawfuncs{*this};
+    std::vector<IStandaloneView*>         m_Views;
+    standaloneview::EngineBridge          m_Engine{};
+    standaloneview::ClientBridge          m_Client{};
+    IStandaloneView*                      m_pCurrentView              = nullptr;
+    const standaloneview::StudioLighting* m_pStudioLighting           = nullptr;
+    int                                   m_iPaintBackgroundDepth     = 0;
+    bool                                  m_bRenderingStandaloneViews = false;
+    bool                                  m_bDrawingViewTriangles     = false;
+    Drawfuncs                             m_Drawfuncs{*this};
 };
 
 CStandaloneViewManager& StandaloneViewManager();

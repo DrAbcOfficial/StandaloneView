@@ -4,6 +4,7 @@
 #include <const.h>
 #include <r_studioint.h>
 #include <ref_params.h>
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -22,6 +23,11 @@ using RenderViewFn      = void (*)();
 using PaintBackgroundFn = void (*)(int*);
 using RenderPortalsFn   = void(__fastcall*)(void*, int, ref_params_s*);
 using ResetAllFn        = int(__fastcall*)(void*, int);
+using StudioLightingFn  = void (*)(alight_t*);
+
+void EngineStudioLighting(alight_t* light);
+void AlternateStudioLighting(alight_t* light);
+void CallStudioLighting();
 
 int                    failures       = 0;
 int                    installs       = 0;
@@ -36,10 +42,23 @@ bool                   svenClient     = false;
 const char*            missingSymbol  = nullptr;
 char                   error[1024]    = {};
 std::vector<uintptr_t> removed;
-RenderViewFn           hookedRenderView      = nullptr;
-PaintBackgroundFn      hookedPaintBackground = nullptr;
-RenderPortalsFn        hookedRenderPortals   = nullptr;
-ResetAllFn             hookedResetAll        = nullptr;
+RenderViewFn           hookedRenderView       = nullptr;
+PaintBackgroundFn      hookedPaintBackground  = nullptr;
+RenderPortalsFn        hookedRenderPortals    = nullptr;
+ResetAllFn             hookedResetAll         = nullptr;
+StudioLightingFn       hookedStudioLighting   = nullptr;
+uintptr_t              studioLightingHandle   = 0;
+int                    lightingCalls          = 0;
+int                    alternateLightingCalls = 0;
+int                    lightingWarnings       = 0;
+alight_t               observedLighting       = {};
+float                  observedDirection[3]   = {};
+cl_entity_t*           savedBoneEntity        = nullptr;
+cl_entity_t*           expectedBoneSource     = nullptr;
+cl_entity_t*           failedPoseEntity       = nullptr;
+cl_entity_t*           nullPlayerStateEntity  = nullptr;
+bool                   bonesPrimed            = true;
+bool                   zeroFxBlend            = false;
 
 int         clientState  = 1;
 int         clientSignon = 0;
@@ -53,18 +72,19 @@ float         blend         = 0.25f;
 float         entOrigin[3]  = {};
 struct DrawCall
 {
-    const char*  function;
-    cl_entity_t* current;
-    float        blend;
-    float        origin[3];
-    int          flags;
-    void*        player;
+    const char*                           function;
+    cl_entity_t*                          current;
+    float                                 blend;
+    float                                 origin[3];
+    int                                   flags;
+    void*                                 player;
+    const standaloneview::StudioLighting* lighting;
 };
 std::vector<DrawCall> drawCalls;
 
 void RecordDraw(const char* function, int flags = 0, void* player = nullptr)
 {
-    DrawCall call{function, currentEntity, blend, {entOrigin[0], entOrigin[1], entOrigin[2]}, flags, player};
+    DrawCall call{function, currentEntity, blend, {entOrigin[0], entOrigin[1], entOrigin[2]}, flags, player, StandaloneViewManager().CurrentStudioLighting()};
     drawCalls.push_back(call);
 }
 
@@ -92,7 +112,10 @@ void __cdecl OriginalRenderView()
         hookedRenderPortals(&portalManager, 0, &refdef);
     }
     if (engineExports)
+    {
         engineExports->HUD_DrawNormalTriangles();
+        engineExports->HUD_DrawTransparentTriangles();
+    }
     ++mainRenders;
 }
 void __fastcall OriginalRenderPortals(void*, int, ref_params_s*) { ++portalRenders; }
@@ -103,7 +126,7 @@ int __fastcall  OriginalResetAll(void*, int)
 }
 void __cdecl EngineDrawBrush(cl_entity_t*) { RecordDraw("brush"); }
 void __cdecl EngineDrawSprite(cl_entity_t*) { RecordDraw("sprite"); }
-int __cdecl  EngineFxBlend(cl_entity_t*) { return FxBlend; }
+int __cdecl  EngineFxBlend(cl_entity_t*) { return zeroFxBlend ? 0 : FxBlend; }
 
 void __cdecl OriginalPaintBackground(int*)
 {
@@ -215,14 +238,22 @@ void CommitHooks()
 hook_t* InlineHook(void* address, void* replacement, void** original)
 {
     ++installs;
-    if (!IsClientAddress(address))
-        Check("resolve every engine symbol before any engine installation", EngineSymbolCount, engineResolves);
-    else
+    const bool lighting = address == reinterpret_cast<void*>(EngineStudioLighting) ||
+        address == reinterpret_cast<void*>(AlternateStudioLighting);
+    if (!lighting && !IsClientAddress(address))
+        Check("resolve every engine symbol before any engine installation", 1,
+              engineResolves >= EngineSymbolCount && engineResolves % EngineSymbolCount == 0);
+    else if (!lighting)
         Check("resolve every client symbol before any client installation", 2, resolves - engineResolves);
     if (failInstall == installs)
         return nullptr;
     pendingOriginals.emplace_back(original, address);
-    if (address == clientSymbols[0].address)
+    if (lighting)
+    {
+        hookedStudioLighting = reinterpret_cast<StudioLightingFn>(replacement);
+        studioLightingHandle = static_cast<uintptr_t>(installs);
+    }
+    else if (address == clientSymbols[0].address)
         hookedRenderPortals = reinterpret_cast<RenderPortalsFn>(replacement);
     else if (address == clientSymbols[1].address)
         hookedResetAll = reinterpret_cast<ResetAllFn>(replacement);
@@ -236,6 +267,11 @@ hook_t* InlineHook(void* address, void* replacement, void** original)
 BOOL UnHook(hook_t* handle)
 {
     removed.push_back(reinterpret_cast<uintptr_t>(handle));
+    if (reinterpret_cast<uintptr_t>(handle) == studioLightingHandle)
+    {
+        hookedStudioLighting = nullptr;
+        studioLightingHandle = 0;
+    }
     return TRUE;
 }
 
@@ -282,6 +318,15 @@ void Reset()
     hookedRenderPortals   = nullptr;
     hookedResetAll        = nullptr;
     clientCalcs = clientDraws = 0;
+    hookedStudioLighting      = nullptr;
+    studioLightingHandle      = 0;
+    lightingCalls = alternateLightingCalls = lightingWarnings = 0;
+    observedLighting                                          = {};
+    savedBoneEntity = expectedBoneSource = failedPoseEntity = nullPlayerStateEntity = nullptr;
+    bonesPrimed                                                                     = true;
+    zeroFxBlend                                                                     = false;
+    drawCalls.clear();
+    engineExports = nullptr;
 }
 
 void Success()
@@ -427,11 +472,21 @@ void ClientFailures()
 int StudioDrawModel(int flags)
 {
     RecordDraw("studio", flags);
+    if (currentEntity == failedPoseEntity)
+        return 0;
+    if (currentEntity->curstate.movetype == MOVETYPE_FOLLOW &&
+        savedBoneEntity != expectedBoneSource)
+        bonesPrimed = false;
+    savedBoneEntity = currentEntity;
+    if (flags & STUDIO_RENDER)
+        CallStudioLighting();
     return 1;
 }
 int StudioDrawPlayer(int flags, entity_state_s* player)
 {
     RecordDraw("player", flags, player);
+    if (flags & STUDIO_RENDER)
+        CallStudioLighting();
     return 1;
 }
 
@@ -442,7 +497,7 @@ r_studio_interface_t* engineStudioInterface = nullptr; // the engine's pStudioAP
 engine_studio_api_t   engineStudioApi       = {};
 cl_entity_t           attachmentOwner       = {};
 
-entity_state_t* GetPlayerState(int index) { return &playerStates[index]; }
+entity_state_t* GetPlayerState(int index) { return currentEntity == nullPlayerStateEntity ? nullptr : &playerStates[index]; }
 int             GetMaxClients() { return MaxClients; }
 cl_entity_t*    GetEntityByIndex(int index) { return index == 7 ? &attachmentOwner : nullptr; }
 
@@ -450,6 +505,49 @@ int ClientGetStudioModelInterface(int, r_studio_interface_t** ppinterface, engin
 {
     *ppinterface = &clientStudio;
     return 1;
+}
+
+int DeclineStudioModelInterface(int, r_studio_interface_t**, engine_studio_api_t*)
+{
+    return 0;
+}
+
+void EngineStudioLighting(alight_t* light)
+{
+    ++lightingCalls;
+    if (!light)
+        return;
+    observedLighting = *light;
+    if (light->plightvec)
+        std::copy_n(light->plightvec, 3, observedDirection);
+}
+
+void AlternateStudioLighting(alight_t* light)
+{
+    ++alternateLightingCalls;
+    EngineStudioLighting(light);
+}
+
+void LightingWarning(const char* format, ...)
+{
+    if (std::strstr(format, "StudioSetupLighting hook failed"))
+        ++lightingWarnings;
+}
+
+void CallStudioLighting()
+{
+    float    direction[3] = {0, 0, -2};
+    alight_t light{};
+    light.ambientlight = 17;
+    light.shadelight   = 29;
+    light.color[0]     = 0.2f;
+    light.color[1]     = 0.4f;
+    light.color[2]     = 0.6f;
+    light.plightvec    = direction;
+    if (hookedStudioLighting)
+        hookedStudioLighting(&light);
+    else if (engineStudioApi.StudioSetupLighting)
+        engineStudioApi.StudioSetupLighting(&light);
 }
 
 class DrawingView : public IStandaloneView
@@ -562,6 +660,316 @@ void EntityDraws()
     drawCalls.clear();
 }
 
+struct StudioOperation
+{
+    cl_entity_t*                          entity;
+    cl_entity_t*                          source;
+    const standaloneview::StudioLighting* lighting;
+    bool                                  poseOnly;
+};
+
+class PreviewView : public CountingView
+{
+public:
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs* drawfuncs) override
+    {
+        if (!transparent)
+            Draw(drawfuncs);
+    }
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs* drawfuncs) override
+    {
+        if (transparent)
+            Draw(drawfuncs);
+    }
+
+    std::vector<StudioOperation> operations;
+    std::vector<bool>            poseResults;
+    bool                         transparent = false;
+
+private:
+    void Draw(IStandaloneViewDrawfuncs* drawfuncs)
+    {
+        auto* studio = static_cast<IStandaloneViewDrawfuncsV003*>(drawfuncs);
+        for (const auto& op : operations)
+        {
+            if (op.poseOnly)
+                poseResults.push_back(studio->SetupStudioPose(op.entity, op.source));
+            else
+                studio->DrawStudioModelEx(op.entity, op.source, op.lighting);
+        }
+    }
+};
+
+cl_exportfuncs_t InstallPreviewClient(HUD_STUDIO_INTERFACE_FUNC getStudio = ClientGetStudioModelInterface)
+{
+    Check("preview engine hooks install", 1, standaloneview::InstallEngineHooks());
+    auto exports                        = ClientExportTable();
+    exports.HUD_GetStudioModelInterface = getStudio;
+    Check("preview client hooks install", 1, standaloneview::InstallClientHooks(&exports));
+    CommitHooks();
+    engineStudioInterface = nullptr;
+    exports.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    return exports;
+}
+
+void RenderPreview(cl_exportfuncs_t& exports)
+{
+    int extents[4] = {};
+    engineExports  = &exports;
+    hookedPaintBackground(extents);
+    engineExports = nullptr;
+}
+
+void V003StudioPasses()
+{
+    for (bool transparent : {false, true})
+    {
+        Reset();
+        engineStudioApi.StudioSetupLighting = nullptr;
+        auto    exports                     = InstallPreviewClient();
+        model_t model{};
+        model.type = mod_studio;
+        cl_entity_t source{}, entity{}, weapon{}, previous{};
+        source.model = entity.model = weapon.model = &model;
+        source.curstate.rendermode                 = kRenderTransAdd;
+        entity.curstate.movetype = weapon.curstate.movetype = MOVETYPE_FOLLOW;
+        expectedBoneSource                                  = &source;
+        zeroFxBlend                                         = true;
+        PreviewView view;
+        view.transparent = transparent;
+        view.operations  = {{&entity, &source, nullptr, true}, {&weapon, &source, nullptr, true}, {&entity, &source, nullptr, false}, {&weapon, &source, nullptr, false}};
+        StandaloneViewManager().RegisterStandaloneView(&view);
+        currentEntity = &previous;
+        blend         = 0.25f;
+        RenderPreview(exports);
+        Check("both follower poses succeed", 1, view.poseResults == std::vector<bool>{true, true});
+        Check("each pose and draw evaluates its source again", 8, static_cast<int>(drawCalls.size()));
+        Check("follower bones always consume their own source", 1, bonesPrimed);
+        if (drawCalls.size() == 8)
+        {
+            for (size_t i = 0; i < drawCalls.size(); ++i)
+            {
+                Check("source precedes every follower", 1,
+                      drawCalls[i].current == (i % 2 == 0 ? &source : (i % 4 == 1 ? &entity : &weapon)));
+                Check("poses and sources use zero flags; draws render without events",
+                      i == 5 || i == 7 ? STUDIO_RENDER : 0, drawCalls[i].flags);
+            }
+            Check("invisible source still evaluates its pose", 1, drawCalls[0].blend == 0.0f);
+        }
+        Check("studio pass restores currententity", 1, currentEntity == &previous);
+        Check("studio pass restores r_blend", 1, blend == 0.25f);
+
+        drawCalls.clear();
+        view.poseResults.clear();
+        view.operations  = {{&entity, &source, nullptr, true}, {&entity, &source, nullptr, false}};
+        failedPoseEntity = &source;
+        RenderPreview(exports);
+        Check("failed source pose is reported", 1, view.poseResults == std::vector<bool>{false});
+        Check("failed source prevents both follower passes", 2, static_cast<int>(drawCalls.size()));
+        Check("failed source restores entity", 1, currentEntity == &previous && blend == 0.25f);
+
+        failedPoseEntity = nullptr;
+        source.model     = nullptr;
+        drawCalls.clear();
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("missing source model skips the pose", 1, view.poseResults == std::vector<bool>{false});
+        Check("missing source model skips every studio call", 0, static_cast<int>(drawCalls.size()));
+        model_t brush{};
+        brush.type   = mod_brush;
+        source.model = &brush;
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("wrong source type skips the pose", 1, view.poseResults == std::vector<bool>{false});
+        Check("wrong source type skips every studio call", 0, static_cast<int>(drawCalls.size()));
+
+        entity.curstate.movetype = 0;
+        view.operations          = {{&entity, nullptr, nullptr, true}, {&entity, nullptr, nullptr, false}};
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("null source evaluates the entity itself", 1, view.poseResults == std::vector<bool>{true});
+        Check("null source adds no extra studio calls", 2, static_cast<int>(drawCalls.size()));
+
+        entity.curstate.rendermode = kRenderTransAdd;
+        drawCalls.clear();
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("invisible entity still supports pose evaluation", 1, view.poseResults == std::vector<bool>{true});
+        Check("zero blend suppresses only the render pass", 1, static_cast<int>(drawCalls.size()));
+        Check("zero blend restores entity state", 1, currentEntity == &previous && blend == 0.25f);
+
+        entity.curstate.rendermode = kRenderNormal;
+        entity.player              = 1;
+        entity.index               = 2;
+        drawCalls.clear();
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("player pose succeeds", 1, view.poseResults == std::vector<bool>{true});
+        Check("player pose and draw dispatch", 2, static_cast<int>(drawCalls.size()));
+        if (drawCalls.size() == 2)
+        {
+            Check("player pose uses StudioDrawPlayer", 0, std::strcmp(drawCalls[0].function, "player"));
+            Check("player pose has no render or events", 0, drawCalls[0].flags);
+            Check("player uses its own slot", 1, drawCalls[1].player == &playerStates[1]);
+            Check("player draw has no events", STUDIO_RENDER, drawCalls[1].flags);
+        }
+        nullPlayerStateEntity = &entity;
+        drawCalls.clear();
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("missing player state skips the pose", 1, view.poseResults == std::vector<bool>{false});
+        Check("missing player state skips the draw", 0, static_cast<int>(drawCalls.size()));
+        nullPlayerStateEntity = nullptr;
+        entity.index          = MaxClients + 1;
+        view.poseResults.clear();
+        RenderPreview(exports);
+        Check("invalid player slot skips the pose", 1, view.poseResults == std::vector<bool>{false});
+        Check("invalid player slot skips the draw", 0, static_cast<int>(drawCalls.size()));
+        Check("studio calls leave no lighting scope behind", 1, StandaloneViewManager().CurrentStudioLighting() == nullptr);
+        StandaloneViewManager().UnregisterStandaloneView(&view);
+    }
+}
+
+void StudioFallback()
+{
+    Reset();
+    engineStudioApi.StudioSetupLighting = nullptr;
+    auto    exports                     = InstallPreviewClient(DeclineStudioModelInterface);
+    model_t model{};
+    model.type = mod_studio;
+    cl_entity_t entity{};
+    entity.model = &model;
+    PreviewView view;
+    view.operations = {{&entity, nullptr, nullptr, true}, {&entity, nullptr, nullptr, false}};
+    StandaloneViewManager().RegisterStandaloneView(&view);
+    RenderPreview(exports);
+    Check("missing studio interface returns false", 1, view.poseResults == std::vector<bool>{false});
+    Check("missing studio interface draws nothing", 0, static_cast<int>(drawCalls.size()));
+    // The engine fills its fallback slot after the client export returns 0.
+    engineStudioInterface = &clientStudio;
+    view.poseResults.clear();
+    RenderPreview(exports);
+    Check("late engine fallback is read at call time", 1, view.poseResults == std::vector<bool>{true});
+    Check("late engine fallback poses and draws", 2, static_cast<int>(drawCalls.size()));
+    StandaloneViewManager().UnregisterStandaloneView(&view);
+}
+
+void StudioLightingHooks()
+{
+    Reset();
+    engineStudioApi.StudioSetupLighting = EngineStudioLighting;
+    auto exports                        = InstallPreviewClient();
+    Check("lighting hook installed after studio capture", 3, installs);
+    CommitHooks();
+    Check("lighting detour is available", 1, hookedStudioLighting != nullptr);
+    if (!hookedStudioLighting)
+        return;
+    CallStudioLighting();
+    Check("main-view lighting forwards unchanged", 1,
+          observedLighting.ambientlight == 17 && observedLighting.shadelight == 29 &&
+              observedLighting.color[0] == 0.2f && observedDirection[2] == -2.0f);
+    hookedStudioLighting(nullptr);
+    Check("null lighting input is forwarded", 2, lightingCalls);
+
+    exports.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    Check("repeated capture does not add a lighting hook", 3, installs);
+    model_t model{};
+    model.type = mod_studio;
+    cl_entity_t entity{}, source{};
+    entity.model = source.model = &model;
+    standaloneview::StudioLighting lighting;
+    lighting.ambientlight = 70;
+    lighting.shadelight   = 40;
+    lighting.color[0]     = 0.5f;
+    lighting.direction[0] = 0;
+    lighting.direction[1] = 2;
+    PreviewView view;
+    view.operations = {{&entity, &source, &lighting, false}};
+    StandaloneViewManager().RegisterStandaloneView(&view);
+    RenderPreview(exports);
+    Check("per-draw lighting reaches the real detour", 1,
+          observedLighting.ambientlight == 70 && observedLighting.shadelight == 40 &&
+              observedLighting.color[0] == 0.5f && observedDirection[0] == 0 &&
+              observedDirection[1] == 1 && observedDirection[2] == 0);
+    Check("lighting rides both source and follower only within the draw", 1,
+          drawCalls.size() == 2 && drawCalls[0].lighting == &lighting && drawCalls[1].lighting == &lighting);
+    Check("lighting ends after the draw", 1, StandaloneViewManager().CurrentStudioLighting() == nullptr);
+    CallStudioLighting();
+    Check("main view keeps world lighting after preview", 17, observedLighting.ambientlight);
+
+    lighting.enabled = false;
+    RenderPreview(exports);
+    Check("disabled lighting is full ambient", 1,
+          observedLighting.ambientlight == 255 && observedLighting.shadelight == 0 && observedLighting.color[0] == 1);
+    view.operations[0].lighting = nullptr;
+    RenderPreview(exports);
+    Check("null per-draw lighting keeps world lighting", 17, observedLighting.ambientlight);
+
+    standaloneview::UninstallClientHooks();
+    Check("client reload retains engine lighting hook", 1, hookedStudioLighting != nullptr && removed.empty());
+    auto reloaded                        = ClientExportTable();
+    reloaded.HUD_GetStudioModelInterface = ClientGetStudioModelInterface;
+    Check("client hooks reinstall", 1, standaloneview::InstallClientHooks(&reloaded));
+    reloaded.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    Check("client recapture reuses engine hook", 3, installs);
+    view.operations[0].lighting = &lighting;
+    RenderPreview(reloaded);
+    Check("lighting still works after client reload", 255, observedLighting.ambientlight);
+
+    const auto oldHandle                = studioLightingHandle;
+    engineStudioApi.StudioSetupLighting = AlternateStudioLighting;
+    reloaded.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    Check("changed lighting target removes old hook", 1, removed.size() == 1 && removed[0] == oldHandle);
+    Check("changed lighting target installs replacement", 4, installs);
+    CommitHooks();
+    CallStudioLighting();
+    Check("replacement trampoline reaches new target", 1, alternateLightingCalls);
+    standaloneview::UninstallEngineHooks();
+    Check("engine teardown removes lighting and both view hooks", 4, static_cast<int>(removed.size()));
+    Check("engine teardown clears lighting detour", 1, hookedStudioLighting == nullptr);
+    standaloneview::UninstallEngineHooks();
+    Check("engine teardown remains idempotent", 4, static_cast<int>(removed.size()));
+    Check("engine hooks reinstall after teardown", 1, standaloneview::InstallEngineHooks());
+    reloaded.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    Check("same lighting target is hooked again after teardown", 7, installs);
+    CommitHooks();
+    StandaloneViewManager().UnregisterStandaloneView(&view);
+    standaloneview::UninstallClientHooks();
+    standaloneview::UninstallEngineHooks();
+    engineStudioApi.StudioSetupLighting = nullptr;
+}
+
+void StudioLightingFailure()
+{
+    Reset();
+    engineStudioApi.StudioSetupLighting = EngineStudioLighting;
+    failInstall                         = 3;
+    auto exports                        = InstallPreviewClient();
+    Check("lighting hook failure reports a warning", 1, lightingWarnings);
+    Check("lighting hook failure leaves no detour", 1, hookedStudioLighting == nullptr);
+    model_t model{};
+    model.type = mod_studio;
+    cl_entity_t entity{};
+    entity.model = &model;
+    standaloneview::StudioLighting lighting;
+    PreviewView                    view;
+    view.operations = {{&entity, nullptr, &lighting, false}};
+    StandaloneViewManager().RegisterStandaloneView(&view);
+    RenderPreview(exports);
+    Check("lighting hook failure still draws the model", 1, static_cast<int>(drawCalls.size()));
+    Check("lighting hook failure falls back to world lighting", 17, observedLighting.ambientlight);
+    failInstall = 0;
+    exports.HUD_GetStudioModelInterface(STUDIO_INTERFACE_VERSION, &engineStudioInterface, &engineStudioApi);
+    Check("failed lighting hook can retry on recapture", 4, installs);
+    CommitHooks();
+    RenderPreview(exports);
+    Check("retry restores per-draw lighting", 96, observedLighting.ambientlight);
+    StandaloneViewManager().UnregisterStandaloneView(&view);
+    standaloneview::UninstallClientHooks();
+    standaloneview::UninstallEngineHooks();
+    engineStudioApi.StudioSetupLighting = nullptr;
+}
+
 void Failures()
 {
     for (const auto& symbol : symbols)
@@ -608,6 +1016,7 @@ int main()
 
     gEngfuncs.GetMaxClients        = GetMaxClients;
     gEngfuncs.GetEntityByIndex     = GetEntityByIndex;
+    gEngfuncs.Con_Printf           = LightingWarning;
     clientStudio.version           = STUDIO_INTERFACE_VERSION;
     clientStudio.StudioDrawModel   = StudioDrawModel;
     clientStudio.StudioDrawPlayer  = StudioDrawPlayer;
@@ -617,6 +1026,10 @@ int main()
     SvenPortals();
     ClientFailures();
     EntityDraws();
+    V003StudioPasses();
+    StudioFallback();
+    StudioLightingHooks();
+    StudioLightingFailure();
     Failures();
     std::printf("StandaloneView hooks: %d failure(s)\n", failures);
     return failures ? 1 : 0;
