@@ -6,6 +6,8 @@
 
 #include "EmptyWorld.h"
 
+extern cl_enginefunc_t gEngfuncs;
+
 namespace standaloneview
 {
 namespace
@@ -15,6 +17,31 @@ constexpr char EmptyWorldName[] = "*standaloneview_empty";
 mleaf_t g_EmptyLeaf              = {};
 model_t g_EmptyWorld             = {};
 bool    g_bEmptyWorldInitialized = false;
+
+// The empty world carries no BSP visibility data: the engine's leaf and PVS calls take
+// their novis path (Mod_LeafPVS returns novis for leafs[0]), but the client's
+// StudioDrawModel runs its own leaf test and culls entities while a real visibility
+// path is active. Ride the engine's r_novis for as long as the empty world is
+// installed; the value is restored before the main view renders.
+cvar_t* g_pNoVisCvar   = nullptr;
+float   g_flSavedNoVis = 0.0f;
+
+void ArmNoVis()
+{
+    g_pNoVisCvar   = gEngfuncs.pfnGetCvarPointer ? gEngfuncs.pfnGetCvarPointer("r_novis") : nullptr;
+    if (!g_pNoVisCvar)
+        return;
+    g_flSavedNoVis      = g_pNoVisCvar->value;
+    g_pNoVisCvar->value = 1.0f;
+}
+
+void RestoreNoVis()
+{
+    if (!g_pNoVisCvar)
+        return;
+    g_pNoVisCvar->value = g_flSavedNoVis;
+    g_pNoVisCvar        = nullptr;
+}
 
 void InitializeEmptyWorld()
 {
@@ -54,6 +81,7 @@ EmptyWorldScope::EmptyWorldScope(model_t** worldModel, cl_entity_t* worldEntity,
     *m_pWorldModel        = GetEmptyWorldModel();
     m_pWorldEntity->model = *m_pWorldModel;
     m_bInstalled          = true;
+    ArmNoVis();
 }
 
 EmptyWorldScope::~EmptyWorldScope()
@@ -61,6 +89,7 @@ EmptyWorldScope::~EmptyWorldScope()
     if (!m_bInstalled)
         return;
 
+    RestoreNoVis();
     *m_pWorldModel        = m_pSavedWorldModel;
     m_pWorldEntity->model = m_pSavedEntityModel;
 }

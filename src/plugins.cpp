@@ -46,3 +46,14 @@ const char* IPluginsV4::GetVersion() { return "1.0.0"; }
 
 EXPOSE_SINGLE_INTERFACE(IPluginsV4, IPluginsV4, METAHOOK_PLUGIN_API_VERSION_V4);
 EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CStandaloneViewManager, IStandaloneViewManager, STANDALONEVIEW_MANAGER_INTERFACE_VERSION, StandaloneViewManager());
+
+// The API_003 version string resolves to the same manager singleton: it marks that the
+// IStandaloneViewDrawfuncs handed to the triangle callbacks implements the V003 studio
+// extensions. The single-registration macro cannot be reused here because its generated
+// names do not include the version string.
+static IBaseInterface* CreateStandaloneViewManagerApi003()
+{
+    return static_cast<IStandaloneViewManager*>(&StandaloneViewManager());
+}
+static InterfaceReg g_Api003Registration(CreateStandaloneViewManagerApi003, STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003);
+

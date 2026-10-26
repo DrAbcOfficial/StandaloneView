@@ -80,4 +80,55 @@ public:
 
 #    define STANDALONEVIEW_MANAGER_INTERFACE_VERSION "StandaloneViewManager_API_002"
 
+namespace standaloneview
+{
+// Per-draw studio lighting for IStandaloneViewDrawfuncsV003::DrawStudioModelEx, applied
+// at the engine's StudioSetupLighting seam while the draw runs: after the engine's
+// dynamic and entity lighting, before the values are consumed. The direction is in
+// world coordinates, opposite the direction from the model towards the light, and is
+// normalized before use.
+struct StudioLighting
+{
+    float color[3]     = {1.0f, 1.0f, 1.0f};
+    float direction[3] = {-1.0f, 0.0f, 0.0f};
+    int   ambientlight = 96;
+    int   shadelight   = 96;
+    bool  enabled      = true; // false draws with full ambient and no shadelight
+};
+} // namespace standaloneview
+
+/*
+    API_003 additions for model previews. A manager obtained as
+    STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003 hands an IStandaloneViewDrawfuncsV003
+    to the triangle callbacks; the API_002 manager keeps handing IStandaloneViewDrawfuncs.
+    The API_002 slots come first in the vtable, so an API_002 consumer receiving the
+    extended object through the base pointer is unaffected.
+
+    Both functions take a private MOVETYPE_FOLLOW bone source: these entities are not
+    registered in the engine's entity array, so aiment cannot reach their animation
+    source. The source's bones are evaluated with flags 0 immediately before the draw,
+    because StudioMergeBones consumes the last StudioSaveBones result and each follower
+    replaces that cache.
+
+    SetupStudioPose evaluates the merged pose without drawing: no culling, no meshes,
+    no events. The engine studio bone transforms remain readable until the next studio
+    call, so a preview can read the posed vertices through StudioGetBoneTransform
+    afterwards. Returns false when the pose was not evaluated.
+
+    DrawStudioModelEx draws with STUDIO_RENDER and no STUDIO_EVENTS (a preview must not
+    fire model events). Pass a StudioLighting to draw with that light instead of the
+    world lighting, or null to keep it. Passes an entity whose model is missing or of
+    another type, or calls outside the triangle callbacks, is a fatal error, as for
+    IStandaloneViewDrawfuncs.
+*/
+class IStandaloneViewDrawfuncsV003 : public IStandaloneViewDrawfuncs
+{
+public:
+    virtual bool SetupStudioPose(struct cl_entity_s* ent, struct cl_entity_s* boneSource)   = 0;
+    virtual void DrawStudioModelEx(struct cl_entity_s* ent, struct cl_entity_s* boneSource,
+                                   const standaloneview::StudioLighting* lighting)          = 0;
+};
+
+#    define STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003 "StandaloneViewManager_API_003"
+
 #endif //STANDALONE_VIEW_INTERFACE_H

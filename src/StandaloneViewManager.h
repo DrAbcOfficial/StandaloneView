@@ -37,8 +37,14 @@ struct ClientBridge
     void (*DrawTransparentTriangles)()          = nullptr;
     // Draws through the studio model interface the engine received from the client.
     void (*DrawStudioModel)(cl_entity_s* ent) = nullptr;
+    // API_003: pose-only studio evaluation and a draw with a private MOVETYPE_FOLLOW
+    // bone source; the per-draw lighting rides the manager's active StudioLighting.
+    bool (*SetupStudioPose)(cl_entity_s* ent, cl_entity_s* boneSource)   = nullptr;
+    void (*DrawStudioModelEx)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
 };
 } // namespace standaloneview
+
+struct alight_s;
 
 class CStandaloneViewManager : public IStandaloneViewManager
 {
@@ -62,9 +68,21 @@ public:
     bool             IsRenderingStandaloneViews() const { return m_bRenderingStandaloneViews; }
     IStandaloneView* GetCurrentView() const { return m_pCurrentView; }
 
+    // The StudioLighting of the V003 studio draw in flight, or null. The host's
+    // StudioSetupLighting hook reads it and folds it into the engine's result.
+    const standaloneview::StudioLighting* CurrentStudioLighting() const { return m_pStudioLighting; }
+
+    // Overlays a StudioLighting onto the engine's lighting result. Fills direction with
+    // the normalized world-space light direction and points light->plightvec at it; the
+    // engine consumes the values synchronously, so the array is owned by the caller.
+    void AdjustStudioLighting(struct alight_s* light, float* direction,
+                              const standaloneview::StudioLighting& lighting) const;
+
 private:
-    // Handed to the triangle callbacks of the view being rendered.
-    class Drawfuncs final : public IStandaloneViewDrawfuncs
+    // Handed to the triangle callbacks of the view being rendered. Implements the API_003
+    // extensions; the API_002 slots are its first three functions, so an API_002 consumer
+    // receiving this object through the base pointer only sees those.
+    class Drawfuncs final : public IStandaloneViewDrawfuncsV003
     {
     public:
         explicit Drawfuncs(CStandaloneViewManager& manager) :
@@ -73,6 +91,9 @@ private:
         void DrawBrushModel(cl_entity_s* ent) override;
         void DrawStudioModel(cl_entity_s* ent) override;
         void DrawSpriteModel(cl_entity_s* ent) override;
+        bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource) override;
+        void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource,
+                               const standaloneview::StudioLighting* lighting) override;
 
     private:
         CStandaloneViewManager& m_Manager;
@@ -88,6 +109,7 @@ private:
     standaloneview::EngineBridge  m_Engine{};
     standaloneview::ClientBridge  m_Client{};
     IStandaloneView*              m_pCurrentView              = nullptr;
+    const standaloneview::StudioLighting* m_pStudioLighting   = nullptr;
     int                           m_iPaintBackgroundDepth     = 0;
     bool                          m_bRenderingStandaloneViews = false;
     bool                          m_bDrawingViewTriangles     = false;

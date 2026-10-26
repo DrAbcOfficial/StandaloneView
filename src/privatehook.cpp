@@ -5,6 +5,7 @@
 #include <demo_api.h>
 #include <r_studioint.h>
 #include <ref_params.h>
+#include <studio.h>
 #include <cstring>
 
 #include "StandaloneViewManager.h"
@@ -264,12 +265,111 @@ void DrawStudioModel(cl_entity_s* ent)
         studio->StudioDrawPlayer(STUDIO_RENDER, state);
 }
 
+// The API_003 studio passes: a private MOVETYPE_FOLLOW bone source is evaluated with
+// flags 0 immediately before the draw (StudioMergeBones consumes the LAST StudioSaveBones
+// result, not aiment, and each follower replaces that cache; flags 0 also bypasses bbox
+// culling for animation-only source models). The draw itself uses STUDIO_RENDER without
+// STUDIO_EVENTS: a preview must not fire model events. The per-draw lighting does not
+// appear here: it rides the manager's active StudioLighting and the host's
+// StudioSetupLighting hook.
+bool StudioModelPass(cl_entity_s* ent, cl_entity_s* boneSource, int flags)
+{
+    if (!studioInterface || !*studioInterface || !(*studioInterface)->StudioDrawModel)
+        return false;
+    if (!ent || !ent->model || ent->model->type != mod_studio)
+        return false;
+
+    if (boneSource)
+    {
+        if (!boneSource->model || boneSource->model->type != mod_studio)
+            return false;
+        EntityDrawScope source(boneSource);
+        if (!(*studioInterface)->StudioDrawModel(0))
+            return false;
+    }
+
+    EntityDrawScope scope(ent);
+    if ((flags & STUDIO_RENDER) && !scope.IsVisible())
+        return false;
+
+    const auto studio = *studioInterface;
+    if (!ent->player)
+        return studio->StudioDrawModel(flags) != 0;
+
+    const int playerIndex = ent->index - 1;
+    if (!engineStudio || playerIndex < 0 || playerIndex >= gEngfuncs.GetMaxClients())
+        return false;
+    const auto state = engineStudio->GetPlayerState(playerIndex);
+    return state && studio->StudioDrawPlayer(flags, state) != 0;
+}
+
+bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
+{
+    return StudioModelPass(ent, boneSource, 0);
+}
+
+void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource)
+{
+    StudioModelPass(ent, boneSource, STUDIO_RENDER);
+}
+
+// The engine's StudioSetupLighting and its trampoline. While an API_003 studio draw is in
+// flight, the manager's active StudioLighting is folded into the engine's lighting result
+// here. The client caches a copy of the studio API table, so the API function itself is
+// hooked rather than a table entry the client no longer reads. The function belongs to the
+// engine, not the reloadable client DLL; the hook is retained across recaptures.
+struct StudioLightBridge
+{
+    hook_t* hook                = nullptr;
+    void (*target)(alight_t*)   = nullptr;
+    void (*original)(alight_t*) = nullptr;
+};
+
+StudioLightBridge studioLightBridge;
+
+void StudioSetupLightingHook(alight_t* light)
+{
+    const auto* lighting = StandaloneViewManager().CurrentStudioLighting();
+    if (!light || !lighting || !studioLightBridge.original)
+    {
+        if (studioLightBridge.original)
+            studioLightBridge.original(light);
+        return;
+    }
+
+    alight_t preview = *light;
+    float    direction[3];
+    StandaloneViewManager().AdjustStudioLighting(&preview, direction, *lighting);
+    studioLightBridge.original(&preview);
+}
+
+void InstallStudioLighting()
+{
+    if (!engineStudio || !engineStudio->StudioSetupLighting || studioLightBridge.target == engineStudio->StudioSetupLighting)
+        return;
+    if (studioLightBridge.hook)
+    {
+        g_pMetaHookAPI->UnHook(studioLightBridge.hook);
+        studioLightBridge = {};
+    }
+    studioLightBridge.target = engineStudio->StudioSetupLighting;
+    studioLightBridge.hook   = g_pMetaHookAPI->InlineHook(reinterpret_cast<void*>(studioLightBridge.target),
+                                                          reinterpret_cast<void*>(StudioSetupLightingHook),
+                                                          reinterpret_cast<void**>(&studioLightBridge.original));
+    if (!studioLightBridge.hook)
+    {
+        studioLightBridge.target = nullptr;
+        gEngfuncs.Con_Printf("[StandaloneView] StudioSetupLighting hook failed; previews draw with the world lighting\n");
+    }
+}
+
 // The engine keeps its own interface in *ppinterface when the client provides none.
 int GetStudioModelInterfaceHook(int version, r_studio_interface_t** ppinterface, engine_studio_api_t* pstudio)
 {
     const int result = originalGetStudioModelInterface(version, ppinterface, pstudio);
     studioInterface  = ppinterface;
     engineStudio     = pstudio;
+    InstallStudioLighting();
     return result;
 }
 
@@ -367,6 +467,8 @@ bool InstallClientHooks(cl_exportfuncs_t* pExportFunc)
     client.DrawNormalTriangles      = pExportFunc->HUD_DrawNormalTriangles;
     client.DrawTransparentTriangles = pExportFunc->HUD_DrawTransparentTriangles;
     client.DrawStudioModel          = DrawStudioModel;
+    client.SetupStudioPose          = SetupStudioPose;
+    client.DrawStudioModelEx        = DrawStudioModelEx;
     StandaloneViewManager().SetClient(client);
 
     // Without the export the engine never asks; keep it that way.
