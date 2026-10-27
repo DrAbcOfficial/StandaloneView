@@ -35,10 +35,15 @@ struct ClientBridge
     void (*V_CalcRefdef)(ref_params_s* pparams) = nullptr;
     void (*DrawNormalTriangles)()               = nullptr;
     void (*DrawTransparentTriangles)()          = nullptr;
-    // Draws through the studio model interface the engine received from the client.
-    void (*DrawStudioModel)(cl_entity_s* ent) = nullptr;
+    // Studio passes through the studio model interface the engine received from the
+    // client, with an optional private MOVETYPE_FOLLOW bone source; the per-draw lighting
+    // rides the manager's active StudioLighting.
+    void (*DrawStudioModel)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
+    bool (*SetupStudioPose)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
 };
 } // namespace standaloneview
+
+struct alight_s;
 
 class CStandaloneViewManager : public IStandaloneViewManager
 {
@@ -62,6 +67,15 @@ public:
     bool             IsRenderingStandaloneViews() const { return m_bRenderingStandaloneViews; }
     IStandaloneView* GetCurrentView() const { return m_pCurrentView; }
 
+    // The StudioLighting of the studio draw in flight, or null. The host's
+    // StudioSetupLighting hook reads it and folds it into the engine's result.
+    const standaloneview::StudioLighting* CurrentStudioLighting() const { return m_pStudioLighting; }
+
+    // Overlays a StudioLighting onto the engine's lighting result. Fills direction with
+    // the normalized world-space light direction and points light->plightvec at it; the
+    // engine consumes the values synchronously, so the array is owned by the caller.
+    void AdjustStudioLighting(struct alight_s* light, float* direction, const standaloneview::StudioLighting& lighting) const;
+
 private:
     // Handed to the triangle callbacks of the view being rendered.
     class Drawfuncs final : public IStandaloneViewDrawfuncs
@@ -71,8 +85,9 @@ private:
             m_Manager(manager) {}
 
         void DrawBrushModel(cl_entity_s* ent) override;
-        void DrawStudioModel(cl_entity_s* ent) override;
+        void DrawStudioModel(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting) override;
         void DrawSpriteModel(cl_entity_s* ent) override;
+        bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource) override;
 
     private:
         CStandaloneViewManager& m_Manager;
@@ -84,14 +99,15 @@ private:
     bool ShouldRenderStandaloneViews() const;
     void RenderStandaloneViews();
 
-    std::vector<IStandaloneView*> m_Views;
-    standaloneview::EngineBridge  m_Engine{};
-    standaloneview::ClientBridge  m_Client{};
-    IStandaloneView*              m_pCurrentView              = nullptr;
-    int                           m_iPaintBackgroundDepth     = 0;
-    bool                          m_bRenderingStandaloneViews = false;
-    bool                          m_bDrawingViewTriangles     = false;
-    Drawfuncs                     m_Drawfuncs{*this};
+    std::vector<IStandaloneView*>         m_Views;
+    standaloneview::EngineBridge          m_Engine{};
+    standaloneview::ClientBridge          m_Client{};
+    IStandaloneView*                      m_pCurrentView              = nullptr;
+    const standaloneview::StudioLighting* m_pStudioLighting           = nullptr;
+    int                                   m_iPaintBackgroundDepth     = 0;
+    bool                                  m_bRenderingStandaloneViews = false;
+    bool                                  m_bDrawingViewTriangles     = false;
+    Drawfuncs                             m_Drawfuncs{*this};
 };
 
 CStandaloneViewManager& StandaloneViewManager();

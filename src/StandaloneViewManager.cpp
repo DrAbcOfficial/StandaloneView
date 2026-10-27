@@ -3,6 +3,7 @@
 #include <com_model.h>
 #include <ref_params.h>
 #include <algorithm>
+#include <cmath>
 
 #include "EmptyWorld.h"
 #include "StandaloneViewManager.h"
@@ -85,7 +86,8 @@ void CStandaloneViewManager::ResetEngine()
 
 void CStandaloneViewManager::ResetClient()
 {
-    m_Client = {};
+    m_Client          = {};
+    m_pStudioLighting = nullptr;
 }
 
 void CStandaloneViewManager::ClearViews()
@@ -120,16 +122,33 @@ void CStandaloneViewManager::Drawfuncs::DrawBrushModel(cl_entity_s* ent)
         m_Manager.m_Engine.DrawBrushModel(ent);
 }
 
-void CStandaloneViewManager::Drawfuncs::DrawStudioModel(cl_entity_s* ent)
+void CStandaloneViewManager::Drawfuncs::DrawStudioModel(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting)
 {
-    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::DrawStudioModel") && m_Manager.m_Client.DrawStudioModel)
-        m_Manager.m_Client.DrawStudioModel(ent);
+    if (!m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::DrawStudioModel"))
+        return;
+    if (!m_Manager.m_Client.DrawStudioModel)
+        return;
+
+    // The lighting rides the draw: the client's studio renderer calls the engine's
+    // StudioSetupLighting synchronously inside this scope, where the host's hook
+    // reads it back through CurrentStudioLighting.
+    const standaloneview::StudioLighting* pSavedLighting = m_Manager.m_pStudioLighting;
+    m_Manager.m_pStudioLighting                          = lighting;
+    m_Manager.m_Client.DrawStudioModel(ent, boneSource);
+    m_Manager.m_pStudioLighting = pSavedLighting;
 }
 
 void CStandaloneViewManager::Drawfuncs::DrawSpriteModel(cl_entity_s* ent)
 {
     if (m_Manager.CanDrawEntity(ent, mod_sprite, "IStandaloneViewDrawfuncs::DrawSpriteModel") && m_Manager.m_Engine.DrawSpriteModel)
         m_Manager.m_Engine.DrawSpriteModel(ent);
+}
+
+bool CStandaloneViewManager::Drawfuncs::SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
+{
+    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::SetupStudioPose"))
+        return m_Manager.m_Client.SetupStudioPose != nullptr && m_Manager.m_Client.SetupStudioPose(ent, boneSource);
+    return false;
 }
 
 bool CStandaloneViewManager::IsRegistered(const IStandaloneView* pView) const
@@ -242,4 +261,22 @@ void CStandaloneViewManager::DrawTransparentTriangles()
 
     if (m_Client.DrawTransparentTriangles)
         m_Client.DrawTransparentTriangles();
+}
+
+void CStandaloneViewManager::AdjustStudioLighting(struct alight_s* light, float* direction, const standaloneview::StudioLighting& lighting) const
+{
+    if (!light || !direction)
+        return;
+
+    const float flLength = std::sqrt(lighting.direction[0] * lighting.direction[0] +
+                                     lighting.direction[1] * lighting.direction[1] +
+                                     lighting.direction[2] * lighting.direction[2]);
+    for (int i = 0; i < 3; ++i)
+        direction[i] = flLength > 0.0f ? lighting.direction[i] / flLength : (i == 0 ? -1.0f : 0.0f);
+
+    light->ambientlight = lighting.enabled ? lighting.ambientlight : 255;
+    light->shadelight   = lighting.enabled ? lighting.shadelight : 0;
+    for (int i = 0; i < 3; ++i)
+        light->color[i] = lighting.enabled ? lighting.color[i] : 1.0f;
+    light->plightvec = direction;
 }

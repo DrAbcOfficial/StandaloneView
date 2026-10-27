@@ -1,6 +1,7 @@
 #include <metahook.h>
 #include <cl_entity.h>
 #include <com_model.h>
+#include <cvardef.h>
 #include <const.h>
 #include <ref_params.h>
 #include <cstdarg>
@@ -10,6 +11,10 @@
 
 #include "EmptyWorld.h"
 #include "StandaloneViewManager.h"
+
+// EmptyWorld.cpp reads r_novis through the client funcs; the default table leaves
+// pfnGetCvarPointer null, which the arming treats as "no cvar access".
+cl_enginefunc_t gEngfuncs = {};
 
 namespace
 {
@@ -65,7 +70,7 @@ void SysError(const char* format, ...)
 
 void EngineDrawBrush(cl_entity_s*) { Log("engine:brush"); }
 void EngineDrawSprite(cl_entity_s*) { Log("engine:sprite"); }
-void ClientDrawStudio(cl_entity_s*) { Log("client:studio"); }
+void ClientDrawStudio(cl_entity_s*, cl_entity_s*) { Log("client:studio"); }
 
 CStandaloneViewManager& Manager()
 {
@@ -168,7 +173,7 @@ private:
             switch (ent->model->type)
             {
                 case mod_brush: pDrawfuncs->DrawBrushModel(ent); break;
-                case mod_studio: pDrawfuncs->DrawStudioModel(ent); break;
+                case mod_studio: pDrawfuncs->DrawStudioModel(ent, nullptr, nullptr); break;
                 case mod_sprite: pDrawfuncs->DrawSpriteModel(ent); break;
                 default: break;
             }
@@ -438,7 +443,7 @@ void Drawfuncs()
 
     events.clear();
     view.drawEntities = {};
-    view.lastDrawfuncs->DrawStudioModel(&studio);
+    view.lastDrawfuncs->DrawStudioModel(&studio, nullptr, nullptr);
     CheckText("draw functions outside the triangle callbacks are rejected", "sys:error", events);
     Check("error names the misused function", 1,
           lastError.find("IStandaloneViewDrawfuncs::DrawStudioModel was called outside") != std::string::npos);
@@ -477,6 +482,228 @@ void ForwardingWithoutView()
     Manager().DrawTransparentTriangles();
     CheckText("missing client exports are ignored", "", events);
 }
+
+cl_entity_t*                          lastPoseEnt        = nullptr;
+cl_entity_t*                          lastPoseBoneSource = nullptr;
+bool                                  poseResult         = true;
+cl_entity_t*                          lastDrawEnt        = nullptr;
+cl_entity_t*                          lastDrawBoneSource = nullptr;
+const standaloneview::StudioLighting* drawActiveLighting = nullptr;
+standaloneview::StudioLighting        previewLighting{};
+
+bool ClientSetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
+{
+    lastPoseEnt        = ent;
+    lastPoseBoneSource = boneSource;
+    return poseResult;
+}
+
+void ClientDrawStudioPreview(cl_entity_s* ent, cl_entity_s* boneSource)
+{
+    lastDrawEnt        = ent;
+    lastDrawBoneSource = boneSource;
+    drawActiveLighting = Manager().CurrentStudioLighting();
+}
+
+// Calls the studio pose and preview draws from the normal triangle callback; the
+// drawfuncs pointer is only valid until the callback returns.
+class StudioPreviewView : public IStandaloneView
+{
+public:
+    bool IsActive() const override { return true; }
+    void CalcRefdef(ref_params_s*) override {}
+    void OnBeforeRenderView() override {}
+    void OnAfterRenderView() override {}
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs* pDrawfuncs) override { Draw(pDrawfuncs); }
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override {}
+
+    void Draw(IStandaloneViewDrawfuncs* pDrawfuncs)
+    {
+        lastDrawfuncs = pDrawfuncs;
+        if (callPose)
+            posed = pDrawfuncs->SetupStudioPose(studio, useBoneSource ? source : nullptr);
+        if (callDraw)
+            pDrawfuncs->DrawStudioModel(studio, useBoneSource ? source : nullptr,
+                                        useLighting ? &previewLighting : nullptr);
+    }
+
+    cl_entity_t*              studio        = nullptr;
+    cl_entity_t*              source        = nullptr;
+    bool                      callPose      = false;
+    bool                      callDraw      = false;
+    bool                      useBoneSource = false;
+    bool                      useLighting   = false;
+    bool                      posed         = false;
+    IStandaloneViewDrawfuncs* lastDrawfuncs = nullptr;
+};
+
+void StudioPreviewDrawfuncs()
+{
+    model_t studioModel = {};
+    model_t brushModel  = {};
+    studioModel.type    = mod_studio;
+    brushModel.type     = mod_brush;
+    cl_entity_t studio  = {};
+    cl_entity_t source  = {};
+    cl_entity_t brush   = {};
+    studio.model        = &studioModel;
+    source.model        = &studioModel;
+    brush.model         = &brushModel;
+
+    ResetState();
+    standaloneview::ClientBridge client;
+    client.DrawStudioModel = ClientDrawStudioPreview;
+    client.SetupStudioPose = ClientSetupStudioPose;
+    Manager().SetClient(client);
+
+    StudioPreviewView view;
+    view.studio = &studio;
+    view.source = &source;
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    Check("a frame without studio calls is clean", 1, lastError.empty());
+
+    view.callPose = true;
+    view.lastDrawfuncs->SetupStudioPose(&studio, nullptr);
+    Check("pose outside the callbacks is rejected", 1,
+          lastError.find("IStandaloneViewDrawfuncs::SetupStudioPose was called outside") != std::string::npos);
+
+    events.clear();
+    lastError.clear();
+    view.lastDrawfuncs->DrawStudioModel(&studio, nullptr, &previewLighting);
+    Check("preview draw outside the callbacks is rejected", 1,
+          lastError.find("IStandaloneViewDrawfuncs::DrawStudioModel was called outside") != std::string::npos);
+    Check("a rejected draw installs no lighting", 1, Manager().CurrentStudioLighting() == nullptr);
+
+    events.clear();
+    lastError.clear();
+    view.callDraw      = true;
+    view.useBoneSource = true;
+    view.useLighting   = true;
+    Frame();
+    Check("the pose reaches the bridge with the bone source", 1, lastPoseEnt == &studio && lastPoseBoneSource == &source);
+    Check("the pose result is forwarded", 1, view.posed);
+    Check("the draw reaches the bridge with the bone source", 1, lastDrawEnt == &studio && lastDrawBoneSource == &source);
+    Check("the configured lighting is active during the draw", 1, drawActiveLighting == &previewLighting);
+    Check("the lighting scope ends with the draw", 1, Manager().CurrentStudioLighting() == nullptr);
+    Check("no misuse during the pass", 1, lastError.empty());
+
+    events.clear();
+    view.useLighting = false;
+    Frame();
+    Check("null lighting keeps the engine lighting", 1, drawActiveLighting == nullptr);
+
+    poseResult = false;
+    Frame();
+    Check("failed bridge pose result is forwarded", 0, view.posed);
+    poseResult = true;
+
+    events.clear();
+    lastError.clear();
+    view.studio = &brush;
+    Frame();
+    Check("a model of the wrong type is rejected", 1, lastError.find("matching type") != std::string::npos);
+
+    ResetState();
+    Manager().SetClient({});
+    lastPoseEnt        = nullptr;
+    lastPoseBoneSource = nullptr;
+    lastDrawEnt        = nullptr;
+    lastDrawBoneSource = nullptr;
+    drawActiveLighting = nullptr;
+    view.studio        = &studio;
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    Check("missing studio bridges pose nothing", 0, view.posed);
+    Check("missing studio bridges draw nothing", 1, lastDrawEnt == nullptr);
+    Check("missing studio bridges are not misuse", 1, lastError.empty());
+}
+
+void AdjustStudioLightingMath()
+{
+    standaloneview::StudioLighting lighting{};
+    lighting.direction[0] = 0.0f;
+    lighting.direction[1] = 2.0f;
+    lighting.color[0]     = 0.5f;
+    alight_t light{};
+    light.ambientlight = 10;
+    light.shadelight   = 20;
+    light.color[0]     = 0.25f;
+    float direction[3] = {};
+
+    Manager().AdjustStudioLighting(&light, direction, lighting);
+    Check("direction is normalized", 1, direction[0] == 0.0f && direction[1] == 1.0f && direction[2] == 0.0f);
+    Check("ambient and shade applied", 1, light.ambientlight == 96 && light.shadelight == 96);
+    Check("color applied", 1, light.color[0] == 0.5f);
+    Check("plightvec points at the direction", 1, light.plightvec == direction);
+
+    lighting.direction[0] = 0.0f;
+    lighting.direction[1] = 0.0f;
+    lighting.direction[2] = 0.0f;
+    Manager().AdjustStudioLighting(&light, direction, lighting);
+    Check("a zero direction falls back along x", 1, direction[0] == -1.0f && direction[1] == 0.0f);
+
+    lighting.enabled = false;
+    Manager().AdjustStudioLighting(&light, direction, lighting);
+    Check("disabled lighting draws full ambient", 1,
+          light.ambientlight == 255 && light.shadelight == 0 && light.color[0] == 1.0f);
+}
+
+cvar_t noVisCvar      = {};
+bool   noVisAvailable = true;
+
+cvar_t* FakeGetCvarPointer(const char* name)
+{
+    CheckText("only the visibility cvar is requested", "r_novis", name);
+    return noVisAvailable ? &noVisCvar : nullptr;
+}
+
+class NoVisProbe : public IStandaloneView
+{
+public:
+    bool IsActive() const override { return true; }
+    void CalcRefdef(ref_params_s*) override {}
+    void OnBeforeRenderView() override { valueDuringPass = noVisCvar.value; }
+    void OnAfterRenderView() override { valueAfterPass = noVisCvar.value; }
+    void DrawNormalTriangles(IStandaloneViewDrawfuncs*) override {}
+    void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override {}
+
+    float valueDuringPass = 0.0f;
+    float valueAfterPass  = 0.0f;
+};
+
+void EmptyWorldNoVis()
+{
+    ResetState();
+    noVisCvar.value             = 0.0f;
+    gEngfuncs.pfnGetCvarPointer = FakeGetCvarPointer;
+    NoVisProbe view;
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    Check("the empty world pass rides r_novis", 1, static_cast<int>(view.valueDuringPass));
+    Check("r_novis stays armed through capture", 1, static_cast<int>(view.valueAfterPass));
+    Check("r_novis restored after the pass", 0, static_cast<int>(noVisCvar.value));
+
+    noVisCvar.value = 0.5f;
+    Frame();
+    Check("a nonzero visibility value is overridden during the pass", 1, view.valueDuringPass == 1.0f);
+    Check("the original fractional visibility value is restored", 1, noVisCvar.value == 0.5f);
+
+    noVisAvailable = false;
+    Frame();
+    Check("an unavailable visibility cvar is ignored", 1, noVisCvar.value == 0.5f && view.valueDuringPass == 0.5f);
+    noVisAvailable = true;
+
+    ResetState();
+    noVisCvar.value = 0.0f;
+    EnterMap();
+    Manager().RegisterStandaloneView(&view);
+    Frame();
+    Check("a loaded world keeps r_novis", 0, static_cast<int>(view.valueDuringPass));
+    Check("loaded-world r_novis untouched", 0, static_cast<int>(noVisCvar.value));
+
+    gEngfuncs.pfnGetCvarPointer = nullptr;
+}
 } // namespace
 
 int main()
@@ -491,6 +718,9 @@ int main()
     RegisterDuringRender();
     Drawfuncs();
     ForwardingWithoutView();
+    StudioPreviewDrawfuncs();
+    AdjustStudioLightingMath();
+    EmptyWorldNoVis();
     std::printf("StandaloneView manager: %d failure(s)\n", failures);
     return failures ? 1 : 0;
 }

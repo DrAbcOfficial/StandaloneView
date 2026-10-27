@@ -19,9 +19,10 @@ depending on Renderer. It replaces the in-Renderer approach of Renderer PR #18.
 
 - `include/Interface/IStandaloneView.h`: `IStandaloneView` (consumer callbacks),
   `IStandaloneViewDrawfuncs` (entity draws, passed to the triangle callbacks) and
-  `IStandaloneViewManager` (`StandaloneViewManager_API_002`). The issue named both
+  `IStandaloneViewManager` (`StandaloneViewManager_API_003`). The issue named both
   classes `IStandaloneView`; the manager was renamed. API_001 (triangle callbacks
-  without parameters) was never released and is not exported any more.
+  without parameters) was never released; API_002 (drawfuncs without bone sources,
+  lighting or `SetupStudioPose`) had no consumers. Neither is exported any more.
 - `src/StandaloneViewManager.cpp`: registry, render loop, `V_CalcRefdef` and triangle
   routing, behind `standaloneview::EngineBridge` / `ClientBridge` for tests.
 - `src/EmptyWorld.cpp`: `EmptyWorldScope`, the empty worldmodel for frames without a map.
@@ -102,6 +103,23 @@ call only the view's callbacks.
   (`GlowBlend` is inlined in Sven).
 - **Load order.** `LoadClient` runs in reverse `plugins.lst` order; listing
   StandaloneView first makes its export wrappers outermost.
+- **API_003 breaks API_002 (user decision, 2026-10-27).** The plugin had no
+  consumers, so the studio preview functions were folded into
+  `IStandaloneViewDrawfuncs` instead of a derived `IStandaloneViewDrawfuncsV003`:
+  `DrawStudioModel(ent, boneSource, lighting)` replaces both the old
+  `DrawStudioModel(ent)` and PR #3's `DrawStudioModelEx` (they used the same
+  `STUDIO_RENDER` flags), and `SetupStudioPose` is appended. Only API_003 is exported.
+- **Studio previews.** `SetupStudioPose` evaluates with flags 0;
+  `DrawStudioModel` renders without events. A private `MOVETYPE_FOLLOW` source
+  is re-evaluated before each follower because merging consumes the last saved
+  bones. The manager scopes per-draw `StudioLighting`; the host hooks the
+  engine's `StudioSetupLighting` function, not a table entry cached by the client.
+  Failed lighting-hook installation warns and retains world lighting. Retain the
+  hook across client recaptures, replace it when the engine target changes and
+  remove/reset it in `UninstallEngineHooks`.
+- **Empty-world studio visibility.** Force `r_novis.value` to 1 only while the
+  empty world is installed and restore the previous value before the main view;
+  do not change it for loaded-world standalone passes.
 - **Loading world replaced too.** `CL_RegisterResources` sets `cl.worldmodel`, then
   `ContinueLoadingProgressBar` redraws a frame, and only then `R_NewMap` sets
   `r_worldentity.model` (HLND2T `cl_parse.c`, `gl_rmisc.c`). A pass in that window hit
@@ -173,6 +191,22 @@ call only the view's callbacks.
 
 ## Verification
 
+- 2026-10-27: interface merge (API_002 retired, no V003 subclass): Win32 Debug and
+  Release builds and all three CTest suites passed in both configurations;
+  `standaloneview_interface` checks the API_003 export and rejects API_001/API_002.
+  clang-format 23.1.3 checked all 11 owned files. Not verified in game.
+- 2026-10-26: API_003 follow-up: full MSVC Win32 Debug/Release builds and all
+  three CTest suites passed. `standaloneview_interface` loads the built DLL and
+  checks API_002/API_003 singleton exports, rejected versions and manager calls
+  across the DLL boundary. Hook tests cover both triangle callbacks, per-follower
+  bone-source evaluation, pose failure, zero blend, player slots, engine fallback,
+  lighting isolation, hook failure/retry, client recapture, target replacement
+  and engine teardown/reinstall. Manager tests cover fractional `r_novis`
+  restoration and an unavailable cvar. Both installed payloads validated against
+  all 11 gamedata snapshots; clang-format 23.1.3 checked all 11 owned files.
+  Mutations removing source evaluation, lighting override, lighting-hook teardown
+  or `r_novis` restoration each failed the regression tests. API_003 has not yet
+  been verified in game.
 - 2026-10-21: standalone Debug/Release build with gamedata sync and validation
   (11 snapshots), CTest `standaloneview_manager` / `standaloneview_hooks` passed
   in both configurations, `format-check` clean (10 files). A mutation that renders
