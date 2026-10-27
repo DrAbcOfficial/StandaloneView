@@ -1,6 +1,5 @@
 /build/
 /install/
-/thirdparty/cache/
 __pycache__/
 *.pyc
 .vs/

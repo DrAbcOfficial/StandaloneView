@@ -132,7 +132,6 @@ cmake --install build --config Release
 
 Repeat with `Debug` for the other configuration. `METAHOOK_SOURCE_PATH` selects a
 local, read-only SDK tree; otherwise the SDK is fetched from its `main` branch.
-VC-LTL 5.3.1 is downloaded and SHA-256 verified, or provided through `VC_LTL_Root`.
 `STANDALONEVIEW_SYNC_GAMEDATA` defaults ON and validates all 11 catalog snapshots
 before building. With it OFF, a previously generated catalog must be supplied for
 installation. Build artifacts and synchronized catalogs stay outside Git.
