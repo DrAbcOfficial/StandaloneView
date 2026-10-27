@@ -564,7 +564,7 @@ public:
         for (auto ent : sprites)
             pDrawfuncs->DrawSpriteModel(ent);
         for (auto ent : studios)
-            pDrawfuncs->DrawStudioModel(ent);
+            pDrawfuncs->DrawStudioModel(ent, nullptr, nullptr);
     }
     void DrawTransparentTriangles(IStandaloneViewDrawfuncs*) override {}
 
@@ -689,13 +689,12 @@ public:
 private:
     void Draw(IStandaloneViewDrawfuncs* drawfuncs)
     {
-        auto* studio = static_cast<IStandaloneViewDrawfuncsV003*>(drawfuncs);
         for (const auto& op : operations)
         {
             if (op.poseOnly)
-                poseResults.push_back(studio->SetupStudioPose(op.entity, op.source));
+                poseResults.push_back(drawfuncs->SetupStudioPose(op.entity, op.source));
             else
-                studio->DrawStudioModelEx(op.entity, op.source, op.lighting);
+                drawfuncs->DrawStudioModel(op.entity, op.source, op.lighting);
         }
     }
 };
@@ -720,7 +719,7 @@ void RenderPreview(cl_exportfuncs_t& exports)
     engineExports = nullptr;
 }
 
-void V003StudioPasses()
+void StudioPreviewPasses()
 {
     for (bool transparent : {false, true})
     {
@@ -1026,7 +1025,7 @@ int main()
     SvenPortals();
     ClientFailures();
     EntityDraws();
-    V003StudioPasses();
+    StudioPreviewPasses();
     StudioFallback();
     StudioLightingHooks();
     StudioLightingFailure();

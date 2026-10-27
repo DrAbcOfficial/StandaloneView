@@ -70,7 +70,7 @@ void SysError(const char* format, ...)
 
 void EngineDrawBrush(cl_entity_s*) { Log("engine:brush"); }
 void EngineDrawSprite(cl_entity_s*) { Log("engine:sprite"); }
-void ClientDrawStudio(cl_entity_s*) { Log("client:studio"); }
+void ClientDrawStudio(cl_entity_s*, cl_entity_s*) { Log("client:studio"); }
 
 CStandaloneViewManager& Manager()
 {
@@ -173,7 +173,7 @@ private:
             switch (ent->model->type)
             {
                 case mod_brush: pDrawfuncs->DrawBrushModel(ent); break;
-                case mod_studio: pDrawfuncs->DrawStudioModel(ent); break;
+                case mod_studio: pDrawfuncs->DrawStudioModel(ent, nullptr, nullptr); break;
                 case mod_sprite: pDrawfuncs->DrawSpriteModel(ent); break;
                 default: break;
             }
@@ -443,7 +443,7 @@ void Drawfuncs()
 
     events.clear();
     view.drawEntities = {};
-    view.lastDrawfuncs->DrawStudioModel(&studio);
+    view.lastDrawfuncs->DrawStudioModel(&studio, nullptr, nullptr);
     CheckText("draw functions outside the triangle callbacks are rejected", "sys:error", events);
     Check("error names the misused function", 1,
           lastError.find("IStandaloneViewDrawfuncs::DrawStudioModel was called outside") != std::string::npos);
@@ -483,12 +483,12 @@ void ForwardingWithoutView()
     CheckText("missing client exports are ignored", "", events);
 }
 
-cl_entity_t*                          lastPoseEnt          = nullptr;
-cl_entity_t*                          lastPoseBoneSource   = nullptr;
-bool                                  poseResult           = true;
-cl_entity_t*                          lastDrawExEnt        = nullptr;
-cl_entity_t*                          lastDrawExBoneSource = nullptr;
-const standaloneview::StudioLighting* drawExActiveLighting = nullptr;
+cl_entity_t*                          lastPoseEnt        = nullptr;
+cl_entity_t*                          lastPoseBoneSource = nullptr;
+bool                                  poseResult         = true;
+cl_entity_t*                          lastDrawEnt        = nullptr;
+cl_entity_t*                          lastDrawBoneSource = nullptr;
+const standaloneview::StudioLighting* drawActiveLighting = nullptr;
 standaloneview::StudioLighting        previewLighting{};
 
 bool ClientSetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
@@ -498,16 +498,16 @@ bool ClientSetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
     return poseResult;
 }
 
-void ClientDrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource)
+void ClientDrawStudioPreview(cl_entity_s* ent, cl_entity_s* boneSource)
 {
-    lastDrawExEnt        = ent;
-    lastDrawExBoneSource = boneSource;
-    drawExActiveLighting = Manager().CurrentStudioLighting();
+    lastDrawEnt        = ent;
+    lastDrawBoneSource = boneSource;
+    drawActiveLighting = Manager().CurrentStudioLighting();
 }
 
-// Calls the API_003 studio extensions from the normal triangle callback; the drawfuncs
-// pointer is only valid until the callback returns.
-class V003View : public IStandaloneView
+// Calls the studio pose and preview draws from the normal triangle callback; the
+// drawfuncs pointer is only valid until the callback returns.
+class StudioPreviewView : public IStandaloneView
 {
 public:
     bool IsActive() const override { return true; }
@@ -519,26 +519,25 @@ public:
 
     void Draw(IStandaloneViewDrawfuncs* pDrawfuncs)
     {
-        auto* v003    = static_cast<IStandaloneViewDrawfuncsV003*>(pDrawfuncs);
-        lastDrawfuncs = v003;
+        lastDrawfuncs = pDrawfuncs;
         if (callPose)
-            posed = v003->SetupStudioPose(studio, useBoneSource ? source : nullptr);
-        if (callDrawEx)
-            v003->DrawStudioModelEx(studio, useBoneSource ? source : nullptr,
-                                    useLighting ? &previewLighting : nullptr);
+            posed = pDrawfuncs->SetupStudioPose(studio, useBoneSource ? source : nullptr);
+        if (callDraw)
+            pDrawfuncs->DrawStudioModel(studio, useBoneSource ? source : nullptr,
+                                        useLighting ? &previewLighting : nullptr);
     }
 
-    cl_entity_t*                  studio        = nullptr;
-    cl_entity_t*                  source        = nullptr;
-    bool                          callPose      = false;
-    bool                          callDrawEx    = false;
-    bool                          useBoneSource = false;
-    bool                          useLighting   = false;
-    bool                          posed         = false;
-    IStandaloneViewDrawfuncsV003* lastDrawfuncs = nullptr;
+    cl_entity_t*              studio        = nullptr;
+    cl_entity_t*              source        = nullptr;
+    bool                      callPose      = false;
+    bool                      callDraw      = false;
+    bool                      useBoneSource = false;
+    bool                      useLighting   = false;
+    bool                      posed         = false;
+    IStandaloneViewDrawfuncs* lastDrawfuncs = nullptr;
 };
 
-void V003StudioDrawfuncs()
+void StudioPreviewDrawfuncs()
 {
     model_t studioModel = {};
     model_t brushModel  = {};
@@ -553,46 +552,46 @@ void V003StudioDrawfuncs()
 
     ResetState();
     standaloneview::ClientBridge client;
-    client.DrawStudioModel   = ClientDrawStudio;
-    client.SetupStudioPose   = ClientSetupStudioPose;
-    client.DrawStudioModelEx = ClientDrawStudioModelEx;
+    client.DrawStudioModel = ClientDrawStudioPreview;
+    client.SetupStudioPose = ClientSetupStudioPose;
     Manager().SetClient(client);
 
-    V003View view;
+    StudioPreviewView view;
     view.studio = &studio;
     view.source = &source;
     Manager().RegisterStandaloneView(&view);
     Frame();
-    Check("a frame without V003 calls is clean", 1, lastError.empty());
+    Check("a frame without studio calls is clean", 1, lastError.empty());
 
     view.callPose = true;
     view.lastDrawfuncs->SetupStudioPose(&studio, nullptr);
-    Check("V003 pose outside the callbacks is rejected", 1,
-          lastError.find("IStandaloneViewDrawfuncsV003::SetupStudioPose was called outside") != std::string::npos);
+    Check("pose outside the callbacks is rejected", 1,
+          lastError.find("IStandaloneViewDrawfuncs::SetupStudioPose was called outside") != std::string::npos);
 
     events.clear();
     lastError.clear();
-    view.lastDrawfuncs->DrawStudioModelEx(&studio, nullptr, nullptr);
-    Check("V003 draw outside the callbacks is rejected", 1,
-          lastError.find("IStandaloneViewDrawfuncsV003::DrawStudioModelEx was called outside") != std::string::npos);
+    view.lastDrawfuncs->DrawStudioModel(&studio, nullptr, &previewLighting);
+    Check("preview draw outside the callbacks is rejected", 1,
+          lastError.find("IStandaloneViewDrawfuncs::DrawStudioModel was called outside") != std::string::npos);
+    Check("a rejected draw installs no lighting", 1, Manager().CurrentStudioLighting() == nullptr);
 
     events.clear();
     lastError.clear();
-    view.callDrawEx    = true;
+    view.callDraw      = true;
     view.useBoneSource = true;
     view.useLighting   = true;
     Frame();
     Check("the pose reaches the bridge with the bone source", 1, lastPoseEnt == &studio && lastPoseBoneSource == &source);
     Check("the pose result is forwarded", 1, view.posed);
-    Check("the draw reaches the bridge with the bone source", 1, lastDrawExEnt == &studio && lastDrawExBoneSource == &source);
-    Check("the configured lighting is active during the draw", 1, drawExActiveLighting == &previewLighting);
+    Check("the draw reaches the bridge with the bone source", 1, lastDrawEnt == &studio && lastDrawBoneSource == &source);
+    Check("the configured lighting is active during the draw", 1, drawActiveLighting == &previewLighting);
     Check("the lighting scope ends with the draw", 1, Manager().CurrentStudioLighting() == nullptr);
     Check("no misuse during the pass", 1, lastError.empty());
 
     events.clear();
     view.useLighting = false;
     Frame();
-    Check("null lighting keeps the engine lighting", 1, drawExActiveLighting == nullptr);
+    Check("null lighting keeps the engine lighting", 1, drawActiveLighting == nullptr);
 
     poseResult = false;
     Frame();
@@ -606,17 +605,18 @@ void V003StudioDrawfuncs()
     Check("a model of the wrong type is rejected", 1, lastError.find("matching type") != std::string::npos);
 
     ResetState();
-    lastPoseEnt          = nullptr;
-    lastPoseBoneSource   = nullptr;
-    lastDrawExEnt        = nullptr;
-    lastDrawExBoneSource = nullptr;
-    drawExActiveLighting = nullptr;
-    view.studio          = &studio;
+    Manager().SetClient({});
+    lastPoseEnt        = nullptr;
+    lastPoseBoneSource = nullptr;
+    lastDrawEnt        = nullptr;
+    lastDrawBoneSource = nullptr;
+    drawActiveLighting = nullptr;
+    view.studio        = &studio;
     Manager().RegisterStandaloneView(&view);
     Frame();
-    Check("missing V003 bridges pose nothing", 0, view.posed);
-    Check("missing V003 bridges draw nothing", 1, lastDrawExEnt == nullptr);
-    Check("missing V003 bridges are not misuse", 1, lastError.empty());
+    Check("missing studio bridges pose nothing", 0, view.posed);
+    Check("missing studio bridges draw nothing", 1, lastDrawEnt == nullptr);
+    Check("missing studio bridges are not misuse", 1, lastError.empty());
 }
 
 void AdjustStudioLightingMath()
@@ -718,7 +718,7 @@ int main()
     RegisterDuringRender();
     Drawfuncs();
     ForwardingWithoutView();
-    V003StudioDrawfuncs();
+    StudioPreviewDrawfuncs();
     AdjustStudioLightingMath();
     EmptyWorldNoVis();
     std::printf("StandaloneView manager: %d failure(s)\n", failures);

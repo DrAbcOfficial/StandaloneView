@@ -242,31 +242,8 @@ void DrawSpriteModel(cl_entity_s* ent)
     memcpy(engineDraw.r_entorigin, savedOrigin, sizeof(savedOrigin));
 }
 
-void DrawStudioModel(cl_entity_s* ent)
-{
-    if (!studioInterface || !*studioInterface)
-        return;
-
-    EntityDrawScope scope(ent);
-    if (!scope.IsVisible())
-        return;
-
-    const auto studio = *studioInterface;
-    if (!ent->player)
-    {
-        studio->StudioDrawModel(STUDIO_RENDER);
-        return;
-    }
-
-    const int playerIndex = ent->index - 1;
-    if (!engineStudio || playerIndex < 0 || playerIndex >= gEngfuncs.GetMaxClients())
-        return;
-    if (const auto state = engineStudio->GetPlayerState(playerIndex))
-        studio->StudioDrawPlayer(STUDIO_RENDER, state);
-}
-
-// The API_003 studio passes: a private MOVETYPE_FOLLOW bone source is evaluated with
-// flags 0 immediately before the draw (StudioMergeBones consumes the LAST StudioSaveBones
+// The studio passes: an optional private MOVETYPE_FOLLOW bone source is evaluated with
+// flags 0 immediately before the entity (StudioMergeBones consumes the LAST StudioSaveBones
 // result, not aiment, and each follower replaces that cache; flags 0 also bypasses bbox
 // culling for animation-only source models). The draw itself uses STUDIO_RENDER without
 // STUDIO_EVENTS: a preview must not fire model events. The per-draw lighting does not
@@ -308,13 +285,13 @@ bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
     return StudioModelPass(ent, boneSource, 0);
 }
 
-void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource)
+void DrawStudioModel(cl_entity_s* ent, cl_entity_s* boneSource)
 {
     StudioModelPass(ent, boneSource, STUDIO_RENDER);
 }
 
-// The engine's StudioSetupLighting and its trampoline. While an API_003 studio draw is in
-// flight, the manager's active StudioLighting is folded into the engine's lighting result
+// The engine's StudioSetupLighting and its trampoline. While a studio draw with a
+// StudioLighting is in flight, that lighting is folded into the engine's lighting result
 // here. The client caches a copy of the studio API table, so the API function itself is
 // hooked rather than a table entry the client no longer reads. The function belongs to the
 // engine, not the reloadable client DLL; the hook is retained across recaptures.
@@ -472,7 +449,6 @@ bool InstallClientHooks(cl_exportfuncs_t* pExportFunc)
     client.DrawTransparentTriangles = pExportFunc->HUD_DrawTransparentTriangles;
     client.DrawStudioModel          = DrawStudioModel;
     client.SetupStudioPose          = SetupStudioPose;
-    client.DrawStudioModelEx        = DrawStudioModelEx;
     StandaloneViewManager().SetClient(client);
 
     // Without the export the engine never asks; keep it that way.

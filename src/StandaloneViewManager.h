@@ -35,12 +35,11 @@ struct ClientBridge
     void (*V_CalcRefdef)(ref_params_s* pparams) = nullptr;
     void (*DrawNormalTriangles)()               = nullptr;
     void (*DrawTransparentTriangles)()          = nullptr;
-    // Draws through the studio model interface the engine received from the client.
-    void (*DrawStudioModel)(cl_entity_s* ent) = nullptr;
-    // API_003: pose-only studio evaluation and a draw with a private MOVETYPE_FOLLOW
-    // bone source; the per-draw lighting rides the manager's active StudioLighting.
-    bool (*SetupStudioPose)(cl_entity_s* ent, cl_entity_s* boneSource)   = nullptr;
-    void (*DrawStudioModelEx)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
+    // Studio passes through the studio model interface the engine received from the
+    // client, with an optional private MOVETYPE_FOLLOW bone source; the per-draw lighting
+    // rides the manager's active StudioLighting.
+    void (*DrawStudioModel)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
+    bool (*SetupStudioPose)(cl_entity_s* ent, cl_entity_s* boneSource) = nullptr;
 };
 } // namespace standaloneview
 
@@ -68,7 +67,7 @@ public:
     bool             IsRenderingStandaloneViews() const { return m_bRenderingStandaloneViews; }
     IStandaloneView* GetCurrentView() const { return m_pCurrentView; }
 
-    // The StudioLighting of the V003 studio draw in flight, or null. The host's
+    // The StudioLighting of the studio draw in flight, or null. The host's
     // StudioSetupLighting hook reads it and folds it into the engine's result.
     const standaloneview::StudioLighting* CurrentStudioLighting() const { return m_pStudioLighting; }
 
@@ -78,20 +77,17 @@ public:
     void AdjustStudioLighting(struct alight_s* light, float* direction, const standaloneview::StudioLighting& lighting) const;
 
 private:
-    // Handed to the triangle callbacks of the view being rendered. Implements the API_003
-    // extensions; the API_002 slots are its first three functions, so an API_002 consumer
-    // receiving this object through the base pointer only sees those.
-    class Drawfuncs final : public IStandaloneViewDrawfuncsV003
+    // Handed to the triangle callbacks of the view being rendered.
+    class Drawfuncs final : public IStandaloneViewDrawfuncs
     {
     public:
         explicit Drawfuncs(CStandaloneViewManager& manager) :
             m_Manager(manager) {}
 
         void DrawBrushModel(cl_entity_s* ent) override;
-        void DrawStudioModel(cl_entity_s* ent) override;
+        void DrawStudioModel(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting) override;
         void DrawSpriteModel(cl_entity_s* ent) override;
         bool SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource) override;
-        void DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting) override;
 
     private:
         CStandaloneViewManager& m_Manager;

@@ -8,8 +8,10 @@ Architecture, design decisions, engine facts and verification status live in
 `memory/StandaloneView.md` (`StandaloneView`, `permalink: standaloneview/standalone-view`).
 Read it before changing the render flow, the public interface or the gamedata manifest.
 
-- Public interface: `include/Interface/IStandaloneView.h`. Keep `StandaloneViewManager_API_002`
-  binary compatible; add a new interface version instead of changing an existing vtable.
+- Public interface: `include/Interface/IStandaloneView.h`, exported as
+  `StandaloneViewManager_API_003`. Any vtable or shared struct layout change must bump
+  `STANDALONEVIEW_MANAGER_INTERFACE_VERSION`; once the interface has consumers, keep the
+  released version binary compatible and add a new version instead.
 - Engine symbols are resolved only through gamedata (`ResolveGameSymbol`); update
   `scripts/manifests/standaloneview.json` in the same change. Do not add scan fallbacks.
 - Core logic stays in `src/StandaloneViewManager.cpp` behind the injected engine/client

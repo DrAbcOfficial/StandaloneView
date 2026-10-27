@@ -122,10 +122,20 @@ void CStandaloneViewManager::Drawfuncs::DrawBrushModel(cl_entity_s* ent)
         m_Manager.m_Engine.DrawBrushModel(ent);
 }
 
-void CStandaloneViewManager::Drawfuncs::DrawStudioModel(cl_entity_s* ent)
+void CStandaloneViewManager::Drawfuncs::DrawStudioModel(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting)
 {
-    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::DrawStudioModel") && m_Manager.m_Client.DrawStudioModel)
-        m_Manager.m_Client.DrawStudioModel(ent);
+    if (!m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::DrawStudioModel"))
+        return;
+    if (!m_Manager.m_Client.DrawStudioModel)
+        return;
+
+    // The lighting rides the draw: the client's studio renderer calls the engine's
+    // StudioSetupLighting synchronously inside this scope, where the host's hook
+    // reads it back through CurrentStudioLighting.
+    const standaloneview::StudioLighting* pSavedLighting = m_Manager.m_pStudioLighting;
+    m_Manager.m_pStudioLighting                          = lighting;
+    m_Manager.m_Client.DrawStudioModel(ent, boneSource);
+    m_Manager.m_pStudioLighting = pSavedLighting;
 }
 
 void CStandaloneViewManager::Drawfuncs::DrawSpriteModel(cl_entity_s* ent)
@@ -136,25 +146,9 @@ void CStandaloneViewManager::Drawfuncs::DrawSpriteModel(cl_entity_s* ent)
 
 bool CStandaloneViewManager::Drawfuncs::SetupStudioPose(cl_entity_s* ent, cl_entity_s* boneSource)
 {
-    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncsV003::SetupStudioPose"))
+    if (m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncs::SetupStudioPose"))
         return m_Manager.m_Client.SetupStudioPose != nullptr && m_Manager.m_Client.SetupStudioPose(ent, boneSource);
     return false;
-}
-
-void CStandaloneViewManager::Drawfuncs::DrawStudioModelEx(cl_entity_s* ent, cl_entity_s* boneSource, const standaloneview::StudioLighting* lighting)
-{
-    if (!m_Manager.CanDrawEntity(ent, mod_studio, "IStandaloneViewDrawfuncsV003::DrawStudioModelEx"))
-        return;
-    if (!m_Manager.m_Client.DrawStudioModelEx)
-        return;
-
-    // The lighting rides the draw: the client's studio renderer calls the engine's
-    // StudioSetupLighting synchronously inside this scope, where the host's hook
-    // reads it back through CurrentStudioLighting.
-    const standaloneview::StudioLighting* pSavedLighting = m_Manager.m_pStudioLighting;
-    m_Manager.m_pStudioLighting                          = lighting;
-    m_Manager.m_Client.DrawStudioModelEx(ent, boneSource);
-    m_Manager.m_pStudioLighting = pSavedLighting;
 }
 
 bool CStandaloneViewManager::IsRegistered(const IStandaloneView* pView) const

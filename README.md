@@ -48,9 +48,8 @@ the first map. `HUD_VidInit` resets the portal manager again for every map.
 
 `include/Interface/IStandaloneView.h` declares `IStandaloneView`, implemented by
 the consumer, `IStandaloneViewDrawfuncs`, passed to its triangle callbacks, and
-`IStandaloneViewManager`, exposed from `StandaloneView.dll`. Request
-`StandaloneViewManager_API_003` for studio pose evaluation, private bone sources
-and per-draw lighting:
+`IStandaloneViewManager`, exposed as `StandaloneViewManager_API_003` from
+`StandaloneView.dll`:
 
 ```cpp
 auto module = GetModuleHandleA("StandaloneView.dll");
@@ -58,17 +57,16 @@ if (module)
 {
     auto factory = Sys_GetFactory((HINTERFACEMODULE)module);
     auto manager = factory ? static_cast<IStandaloneViewManager*>(
-        factory(STANDALONEVIEW_MANAGER_INTERFACE_VERSION_V003, nullptr)) : nullptr;
+        factory(STANDALONEVIEW_MANAGER_INTERFACE_VERSION, nullptr)) : nullptr;
     if (manager)
         manager->RegisterStandaloneView(&g_MyView);
 }
 ```
 
-`StandaloneViewManager_API_002` remains available with its unchanged manager and
-drawfuncs vtables. Both versions return the same manager singleton. A consumer
-that only needs the original three entity-draw functions can continue to request
-`STANDALONEVIEW_MANAGER_INTERFACE_VERSION`. Do not use the API_003 drawfuncs unless
-the API_003 factory query succeeded.
+API_003 added studio pose evaluation, private bone sources and per-draw lighting
+directly to `IStandaloneViewDrawfuncs`, breaking the drawfuncs vtable; the earlier
+`StandaloneViewManager_API_001` / `_API_002` had no consumers and are no longer
+exported.
 
 Consumers should treat the plugin as optional and unregister their views before
 the view objects are destroyed. Usage rules:
@@ -114,31 +112,28 @@ the view objects are destroyed. Usage rules:
   its wrappers run first: other plugins' `V_CalcRefdef` then never change a
   standalone view's refdef.
 
-### API_003 studio previews
+### Studio previews
 
-After obtaining the API_003 manager, the drawfuncs passed to either triangle
-callback can be cast to `IStandaloneViewDrawfuncsV003`. For example, inside that
-callback:
+The studio functions of `IStandaloneViewDrawfuncs` take an optional bone source and,
+for draws, an optional lighting. For example, inside a triangle callback:
 
 ```cpp
-auto* studio = static_cast<IStandaloneViewDrawfuncsV003*>(pDrawfuncs);
 standaloneview::StudioLighting lighting;
-studio->DrawStudioModelEx(&previewEntity, &animationSource, &lighting);
+pDrawfuncs->DrawStudioModel(&previewEntity, &animationSource, &lighting);
 ```
 
 - `SetupStudioPose(entity, boneSource)` evaluates the pose with flags `0`: no
   meshes, visibility culling or animation events. It returns whether evaluation
   succeeded. The consumer can read the engine's `StudioGetBoneTransform` results
   immediately afterwards, until the next studio call.
-- `DrawStudioModelEx(entity, boneSource, lighting)` renders with `STUDIO_RENDER`,
-  never `STUDIO_EVENTS`. As with `DrawStudioModel`, player entities use the player
-  state at `index - 1`; other entities use `StudioDrawModel`.
+- `DrawStudioModel(entity, boneSource, lighting)` renders with `STUDIO_RENDER`,
+  never `STUDIO_EVENTS`, as described above.
 - Pass `nullptr` for `boneSource` to use the entity's own animation. For a private
   `MOVETYPE_FOLLOW` entity, pass its animation source explicitly: it need not have
   a slot in the engine entity array. The source pose is evaluated again before
   every follower, because studio bone merging consumes the last saved bones.
   An invalid source model or failed source evaluation returns `false` from
-  `SetupStudioPose` and skips `DrawStudioModelEx`.
+  `SetupStudioPose` and skips `DrawStudioModel`.
 - A non-null `StudioLighting` overrides ambient light, shade, color and the
   world-space light-ray direction for that draw only. The direction is normalized;
   a zero vector falls back to `{-1, 0, 0}`. `enabled = false` requests full ambient
@@ -146,8 +141,7 @@ studio->DrawStudioModelEx(&previewEntity, &animationSource, &lighting);
   be installed, the plugin warns and the model still renders with world lighting.
 
 The lighting hook survives client interface recaptures but is removed when engine
-hooks are uninstalled. Neither pose evaluation nor per-draw lighting changes the
-API_002 contract.
+hooks are uninstalled.
 
 With Renderer, a standalone pass with an empty world additionally requires
 Renderer to skip its water pass for `onlyClientDraws` views, and
@@ -197,13 +191,13 @@ Regression tests compile the production manager, empty world and hook installati
 code against the SDK. They model the engine's `V_RenderView` and cover render
 order, forced and restored client state, the empty world, the paint-background
 gate, demo playback, reentrancy, the unregister-during-a-pass contract, export routing,
-entity draws through `IStandaloneViewDrawfuncs`, API_003 source/follower ordering
+entity draws through `IStandaloneViewDrawfuncs`, studio source/follower ordering
 and flags in both triangle callbacks, pose failure and engine fallback,
 per-draw lighting isolation, lighting-hook failure/retry/recapture/teardown,
 `r_novis` restoration and installation rollback, including MetaHook committing
 inline hooks only after `LoadEngine` / `LoadClient` return. The full build also
-loads the resulting DLL to verify API_002/API_003 factory exports and the manager
-vtable across the DLL boundary. These tests do not replace in-game verification.
+loads the resulting DLL to verify the API_003 factory export, the rejected retired
+versions and the manager vtable across the DLL boundary. These tests do not replace in-game verification.
 
 ## References
 
