@@ -122,14 +122,22 @@ void __fastcall RenderPortalsHook(void* pthis, int, ref_params_s* pparams)
     originalRenderPortals(pthis, 0, pparams);
 }
 
-// The client creates its portal manager on first use and resets it then, which needs
-// the client's GL entry points; the client initializes them only when a map loads. A
-// pass at the main menu may be that first use. HUD_VidInit resets the manager again
-// for every map, so a skipped reset loses nothing.
+// Sven's portal manager has a one-shot studio/first-person flag at byte 0x1E8.
+// Its constructor relies on ResetAll to initialize it. Studio drawing consumes it
+// even without a map and, when set, dereferences the (then absent) local player.
+constexpr size_t PortalStudioFlagOffset = 0x1E8;
+
+// The client creates its portal manager on first use and resets it then. A menu
+// preview may be that first use, before the client's GL entry points are ready.
+// Preserve ResetAll's CPU-side studio flag initialization without calling its GL
+// cleanup. HUD_VidInit still performs the full native reset for every map.
 int __fastcall ResetAllHook(void* pthis, int)
 {
     if (StandaloneViewManager().GetCurrentView())
+    {
+        static_cast<unsigned char*>(pthis)[PortalStudioFlagOffset] = 0;
         return 0;
+    }
     return originalResetAll(pthis, 0);
 }
 
