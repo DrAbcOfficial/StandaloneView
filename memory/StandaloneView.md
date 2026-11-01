@@ -202,6 +202,15 @@ call only the view's callbacks.
 
 ## Verification
 
+- 2026-11-01: reproduced PR #4's Release `standaloneview_hooks` segfault at
+  head `3764dfb`. The test host lacked `QueryGameSymbolStructMember`, so portal
+  installation failed and the test called a NULL hook; its four-byte fake manager
+  also could not hold the queried member. Added the query mock and a 1024-byte
+  manager buffer, with checks for offsets 0/44/488/700, untouched neighboring
+  bytes, query caching, missing API, query failures and retry. Full Win32
+  Debug/Release builds and all three CTest suites passed in both configurations;
+  public gamedata sync/validation passed for 11 snapshots, and clang-format
+  23.1.3 checked all 11 owned files. Not verified in game.
 - 2026-10-27: interface merge (API_002 retired, no V003 subclass): Win32 Debug and
   Release builds and all three CTest suites passed in both configurations;
   `standaloneview_interface` checks the API_003 export and rejects API_001/API_002.
